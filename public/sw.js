@@ -1,9 +1,10 @@
+// BUILD_VER: 300
 /**
  * Mesajlaşma Uygulaması - Service Worker (Arka Planda Çalışma ve Bildirim Motoru)
  * Uygulama kapatılsa bile arka planda yeni mesaj ve aramaları kontrol eder ve bildirim gösterir.
  */
 
-const CACHE_NAME = 'mesajlasma-pwa-v5';
+const CACHE_NAME = 'mesajlasma-pwa-v6';
 const ASSETS = [
   '/',
   '/index.html',

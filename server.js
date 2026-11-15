@@ -28,14 +28,15 @@ function normalizePhone(rawPhone) {
 }
 
 function formatPhoneDisplay(rawPhone) {
+  const cleanedRaw = String(rawPhone || '').replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, '').trim();
   if (typeof dbModule.formatPhoneDisplay === 'function') {
-    return dbModule.formatPhoneDisplay(rawPhone);
+    return dbModule.formatPhoneDisplay(cleanedRaw);
   }
-  const norm = normalizePhone(rawPhone);
+  const norm = normalizePhone(cleanedRaw);
   if (/^\+90\d{10}$/.test(norm)) {
     return `${norm.slice(0, 3)} ${norm.slice(3, 6)} ${norm.slice(6, 9)} ${norm.slice(9, 11)} ${norm.slice(11, 13)}`;
   }
-  return String(rawPhone || norm).trim();
+  return String(cleanedRaw || norm).trim();
 }
 
 function buildInvitePayload(opts = {}) {
@@ -796,8 +797,10 @@ function enrichMessage(msgRow, currentUserId) {
  * ya da henüz kayıtlı değilse rehber profili oluşturur.
  */
 function ensureContactUserByPhone(rawName, rawPhone) {
-  const phoneStr = Array.isArray(rawPhone) ? String(rawPhone[0] || '') : String(rawPhone || '');
-  const nameStr = Array.isArray(rawName) ? String(rawName[0] || '').trim() : String(rawName || '').trim();
+  const rawPhoneVal = Array.isArray(rawPhone) ? String(rawPhone[0] || '') : String(rawPhone || '');
+  const phoneStr = rawPhoneVal.replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, '').trim();
+  const rawNameVal = Array.isArray(rawName) ? String(rawName[0] || '') : String(rawName || '');
+  const nameStr = rawNameVal.replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, '').trim();
   let normPhone = normalizePhone(phoneStr);
 
   // Eğer numara boşsa ama rehberden isim seçilmişse veya kısa numara girilmişse yine de kabul et
@@ -805,10 +808,12 @@ function ensureContactUserByPhone(rawName, rawPhone) {
     return null;
   }
   if (!normPhone) {
-    normPhone = '+000' + crypto.createHash('sha1').update(nameStr.toLowerCase()).digest('hex').slice(0, 8);
+    const hashBuf = crypto.createHash('sha1').update(nameStr.toLowerCase()).digest();
+    const numericSuffix = String(hashBuf.readUInt32BE(0) % 100000000).padStart(8, '0');
+    normPhone = '+9000' + numericSuffix;
   }
 
-  const displayPhone = phoneStr.trim() ? formatPhoneDisplay(phoneStr) : normPhone;
+  const displayPhone = phoneStr ? formatPhoneDisplay(phoneStr) : normPhone;
 
   // Önce bu numarayı kullanan gerçek kayıtlı kullanıcı var mı kontrol et
   let targetUser = db.prepare('SELECT * FROM users WHERE phone_normalized = ? ORDER BY is_registered DESC LIMIT 1').get(normPhone);
@@ -2049,22 +2054,41 @@ async function handleRequest(req, res) {
       return fs.createReadStream(fullPath).pipe(res);
     }
 
-    // Statik Web / PWA Dosyaları
+    // Statik Web / PWA Dosyaları (Hem kök dizin hem public/ dizini desteklenir; en güncel BUILD_VER seçilir)
     let relPath = pathname === '/' ? '/index.html' : pathname;
-    const safeFile = path.normalize(relPath).replace(/^(\.\.[/\\])+/, '');
-    let filePath = path.join(PUBLIC_DIR, safeFile);
+    const safeFile = path.normalize(relPath).replace(/^(\.\.[/\\])+/, '').replace(/^[/\\]+/, '');
 
-    if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
-      filePath = path.join(PUBLIC_DIR, 'index.html');
-    }
+    const getBuildVer = (p) => {
+      try {
+        if (!fs.existsSync(p) || fs.statSync(p).isDirectory()) return -1;
+        const head = fs.readFileSync(p, 'utf8').slice(0, 200);
+        const m = head.match(/BUILD_VER:\s*(\d+)/);
+        return m ? Number(m[1]) : 0;
+      } catch {
+        return -1;
+      }
+    };
+
+    const pickNewestFile = (relName) => {
+      const pubCandidate = path.join(PUBLIC_DIR, relName);
+      const rootCandidate = path.join(__dirname, relName);
+      const pubVer = getBuildVer(pubCandidate);
+      const rootVer = getBuildVer(rootCandidate);
+      if (rootVer > pubVer) return rootCandidate;
+      if (pubVer >= 0) return pubCandidate;
+      if (rootVer >= 0) return rootCandidate;
+      return null;
+    };
+
+    let filePath = pickNewestFile(safeFile) || pickNewestFile('index.html') || path.join(PUBLIC_DIR, 'index.html');
 
     const ext = path.extname(filePath).toLowerCase();
     res.writeHead(200, {
       'Content-Type': MIME_TYPES[ext] || 'text/plain; charset=utf-8',
-      'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+      'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0',
       'Pragma': 'no-cache',
       'Expires': '0',
-      'Permissions-Policy': 'contacts=(self), camera=(self), microphone=(self), geolocation=(self)'
+      'Permissions-Policy': 'contacts=(self), camera=(self), microphone=(self), speaker-selection=(self), geolocation=(self)'
     });
     fs.createReadStream(filePath).pipe(res);
   } catch (err) {
@@ -2232,7 +2256,9 @@ function handleWsMessage(client, msg) {
       'ice-candidate',
       'call-reject',
       'call-end',
-      'call-busy'
+      'call-busy',
+      'call-connected',
+      'call-media'
     ].includes(msg.type)
   ) {
     const payload = {
@@ -2241,10 +2267,20 @@ function handleWsMessage(client, msg) {
       fromDisplayName: client.displayName
     };
 
+    const targetSet = new Set();
     if (msg.targetUserId) {
-      sendToUser(msg.targetUserId, payload);
-    } else if (msg.conversationId) {
-      broadcastToConversation(msg.conversationId, payload, client.userId);
+      targetSet.add(msg.targetUserId);
+    }
+    if (msg.conversationId) {
+      const members = db.prepare('SELECT user_id FROM conversation_members WHERE conversation_id = ?').all(msg.conversationId);
+      for (const m of members) {
+        if (m.user_id !== client.userId) {
+          targetSet.add(m.user_id);
+        }
+      }
+    }
+    for (const uid of targetSet) {
+      sendToUser(uid, payload);
     }
   }
 }

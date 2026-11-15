@@ -1,9 +1,11 @@
+// BUILD_VER: 300
 /**
- * Mesajlaşma Uygulaması - İstemci Uygulama Mantığı
+ * Mesajlaşma Uygulaması - İstemci Uygulama Mantığı (v3.0)
  * - Cep Telefonu Rehberinden Kişi Ekleme (Contact Picker API + VCF + Toplu Metin + Manuel)
  * - Numara veya Rehberden Eklenen Kişilere SMS ve WhatsApp Mesajı Gönderme
  *   ("............ Bu numaraları kullanıcı sizi programı kullanmak için ekledi")
  * - Kaydedilen Kişiler Programı Kullandığında Otomatik Numara ve Hesap Entegrasyonu
+ * - Gerçek Zamanlı Sesli & Görüntülü Arama (WebRTC + CGNAT WebSocket Ses/Görüntü Rölesi + Sesi Dışarı Verme / Hoparlör)
  * - Aktif Olanları Yeşil (🟢), Aktif Olmayanları Kırmızı (🔴) Yuvarlakla Gösterme
  * - Program Kapatılsa Bile Arka Planda Çalışma İzni (Service Worker + Push/Notification + WakeLock)
  */
@@ -39,13 +41,25 @@ const App = {
   recTimerInterval: null,
   recSeconds: 0,
 
-  // WebRTC Arama Durumu
+  // WebRTC & Canlı Arama Durumu
   peerConnection: null,
   localStream: null,
+  remoteStream: null,
+  pendingIceCandidates: [],
   activeCall: null,
   incomingOffer: null,
   callTimerInterval: null,
+  callRingInterval: null,
   callSeconds: 0,
+  isSpeakerOn: false,
+  callAudioCtx: null,
+  speakerGainNode: null,
+  remoteStreamSource: null,
+  wsAudioProcessor: null,
+  wsVideoInterval: null,
+  webrtcAudioReceived: false,
+  webrtcVideoReceived: false,
+  nextPlayTime: 0,
 
   async init() {
     const savedTheme = localStorage.getItem('msj_theme') || 'dark';
@@ -75,7 +89,7 @@ const App = {
 
     if ('serviceWorker' in navigator) {
       try {
-        const reg = await navigator.serviceWorker.register('/sw.js?v=2.5');
+        const reg = await navigator.serviceWorker.register('/sw.js?v=3.0');
         reg.update().catch(() => {});
         if (this.token && reg.active) {
           reg.active.postMessage({ type: 'SET_BG_TOKEN', token: this.token });
@@ -334,68 +348,121 @@ const App = {
     }
   },
 
+  async syncContactsWithRetry(payload, maxRetries = 3) {
+    let lastErr = null;
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        return await this.api('/api/contacts/sync', 'POST', payload);
+      } catch (err) {
+        lastErr = err;
+        // Android rehber ekranından tarayıcıya dönerken ağ soketi uyanma gecikmesi için kısa bekleme
+        await new Promise((r) => setTimeout(r, 350 * attempt));
+      }
+    }
+    throw lastErr || new Error('Rehber senkronizasyonu başarısız oldu.');
+  },
+
+  async readFileTextSafe(file) {
+    if (file && typeof file.text === 'function') {
+      try {
+        const t = await file.text();
+        if (t && t.trim()) return t;
+      } catch {}
+    }
+    return await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ''));
+      reader.onerror = () => reject(new Error('Rehber dosyası okunamadı.'));
+      reader.readAsText(file, 'UTF-8');
+    });
+  },
+
   async processPickedPhoneContacts(selected) {
     try {
+      const list = Array.from(selected || []);
       const formatted = [];
-      for (const c of selected) {
+      for (const c of list) {
         if (!c) continue;
-        const rawName = Array.isArray(c.name) && c.name.length > 0
-          ? c.name.filter(Boolean).join(' ')
-          : String(c.name || c.displayName || '').trim();
-        const phones = Array.isArray(c.tel)
+        const rawNameArr = Array.isArray(c.name) ? c.name : (c.name ? [c.name] : []);
+        const cleanName = rawNameArr
+          .map((n) => String(n || '').replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, '').trim())
+          .filter(Boolean)
+          .join(' ') || String(c.displayName || '').trim();
+
+        const rawTelArr = Array.isArray(c.tel)
           ? c.tel
           : (c.tel ? [c.tel] : (Array.isArray(c.phone) ? c.phone : (c.phone ? [c.phone] : [])));
-        const cleanPhones = phones.map((p) => String(p || '').trim()).filter(Boolean);
+        const cleanPhones = rawTelArr
+          .map((p) => String(p || '').replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, '').trim())
+          .filter(Boolean);
 
         if (cleanPhones.length > 0) {
           for (const tel of cleanPhones) {
             formatted.push({
-              name: String(rawName || '').trim(),
+              name: cleanName || tel,
               phone: tel
             });
           }
-        } else if (rawName) {
+        } else if (cleanName) {
           formatted.push({
-            name: String(rawName).trim(),
+            name: cleanName,
             phone: ''
           });
         }
       }
 
-      const payloadContacts = formatted.length > 0 ? formatted : selected;
-      const res = await this.api('/api/contacts/sync', 'POST', {
-        contacts: payloadContacts,
+      if (formatted.length === 0 && list.length > 0) {
+        formatted.push({ name: 'Rehber Kişisi', phone: '' });
+      }
+
+      // Kullanıcıya anında görsel geri bildirim ver ve form kutularını da doldur
+      if (formatted.length > 0) {
+        const nameInput = document.getElementById('contact-name-input');
+        const phoneInput = document.getElementById('contact-phone-input');
+        const bulkInput = document.getElementById('bulk-contacts-input');
+        if (nameInput) nameInput.value = formatted[0].name || '';
+        if (phoneInput && formatted[0].phone) phoneInput.value = formatted[0].phone;
+        if (bulkInput && formatted.length > 1) {
+          bulkInput.value = formatted.map((f) => `${f.name} ${f.phone}`.trim()).join('\n');
+        }
+      }
+
+      this.toast(`⏳ Rehberden seçilen ${formatted.length} kişi kaydediliyor...`);
+
+      const res = await this.syncContactsWithRetry({
+        contacts: formatted,
         inviteChannel: 'auto',
         appUrl: location.origin
       });
 
-      if (!res.importedCount) {
-        this.toast('Seçilen kişilerde kaydedilebilir bilgi bulunamadı.', 'error');
+      if (!res || !res.importedCount) {
+        this.toast('Seçilen kişilerde kaydedilebilir numara bulunamadı.', 'error');
         return;
       }
 
       this.closeModal('contact-modal');
-      this.toast(`📱 Telefon rehberinizden ${res.importedCount} kişi başarıyla eklendi!`);
+      this.toast(`✅ Telefon rehberinizden ${res.importedCount} kişi başarıyla eklendi!`);
       await Promise.all([this.loadUsers(), this.loadConversations()]);
       this.switchNav('contacts');
       this.openInviteModal(res);
     } catch (err) {
-      this.toast('Rehber aktarımı hatası: ' + err.message, 'error');
+      this.toast('Rehber aktarımı hatası: ' + (err.message || 'Bağlantı hatası'), 'error');
     }
   },
 
   async handleVcfFileSelected(e) {
-    const files = Array.from(e.target.files || []);
+    const inputEl = e.target;
+    const files = Array.from((inputEl && inputEl.files) || []);
     if (files.length === 0) return;
-    e.target.value = '';
 
     try {
+      this.toast('⏳ Rehber dosyası okunuyor...');
       let combinedText = '';
       for (const f of files) {
-        combinedText += '\n' + (await f.text());
+        combinedText += '\n' + (await this.readFileTextSafe(f));
       }
 
-      const res = await this.api('/api/contacts/sync', 'POST', {
+      const res = await this.syncContactsWithRetry({
         rawText: combinedText,
         inviteChannel: 'auto',
         appUrl: location.origin
@@ -412,6 +479,8 @@ const App = {
       this.openInviteModal(res);
     } catch (err) {
       this.toast(err.message, 'error');
+    } finally {
+      if (inputEl) inputEl.value = '';
     }
   },
 
@@ -881,7 +950,7 @@ const App = {
       return;
     }
 
-    // WebRTC Sinyalizasyon Olayları
+    // WebRTC ve Canlı Arama Sinyalizasyon Olayları
     if (ev.type === 'call-offer') {
       this.handleIncomingCallOffer(ev);
       return;
@@ -892,6 +961,10 @@ const App = {
     }
     if (ev.type === 'ice-candidate') {
       await this.handleRemoteIce(ev);
+      return;
+    }
+    if (ev.type === 'call-media') {
+      this.handleRemoteCallMedia(ev);
       return;
     }
     if (ev.type === 'call-reject' || ev.type === 'call-end') {
@@ -2100,11 +2173,169 @@ const App = {
     document.getElementById('qr-svg-box').innerHTML = info.qrSvg;
   },
 
-  // --- WebRTC Sesli ve Görüntülü Arama ---
+  // --- WebRTC + CGNAT Röleli Sesli ve Görüntülü Arama + Sesi Dışarı Verme (Hoparlör) ---
+  ensureCallAudioContext() {
+    if (!this.callAudioCtx || this.callAudioCtx.state === 'closed') {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      this.callAudioCtx = new AudioCtx();
+      const compressor = this.callAudioCtx.createDynamicsCompressor();
+      compressor.threshold.value = -24;
+      compressor.knee.value = 20;
+      compressor.ratio.value = 6;
+      compressor.attack.value = 0.003;
+      compressor.release.value = 0.25;
+
+      this.speakerGainNode = this.callAudioCtx.createGain();
+      this.speakerGainNode.gain.value = this.isSpeakerOn ? 3.2 : 1.0;
+      this.speakerGainNode.connect(compressor);
+      compressor.connect(this.callAudioCtx.destination);
+      this.nextPlayTime = 0;
+    }
+    if (this.callAudioCtx.state === 'suspended') {
+      this.callAudioCtx.resume().catch(() => {});
+    }
+    return this.callAudioCtx;
+  },
+
+  startRingTone(mode = 'outgoing') {
+    this.stopRingTone();
+    const playPattern = () => {
+      this.playBeep(mode === 'incoming' ? 880 : 440, 0.25);
+      setTimeout(() => {
+        if (this.callRingInterval) {
+          this.playBeep(mode === 'incoming' ? 660 : 480, 0.25);
+        }
+      }, 300);
+    };
+    playPattern();
+    this.callRingInterval = setInterval(playPattern, 2400);
+  },
+
+  stopRingTone() {
+    if (this.callRingInterval) {
+      clearInterval(this.callRingInterval);
+      this.callRingInterval = null;
+    }
+  },
+
+  updateSpeakerButtonUi() {
+    const btn = document.getElementById('btn-toggle-speaker');
+    if (!btn) return;
+    if (this.isSpeakerOn) {
+      btn.textContent = '🔊 Hoparlör: Açık';
+      btn.style.background = '#10b981';
+      btn.style.color = '#ffffff';
+    } else {
+      btn.textContent = '🔈 Sesi Dışarı Ver';
+      btn.style.background = '#202c33';
+      btn.style.color = '#ffffff';
+    }
+  },
+
+  async applyAudioOutputRouting() {
+    this.updateSpeakerButtonUi();
+    const remoteVideo = document.getElementById('remote-video');
+    const remoteAudio = document.getElementById('remote-audio');
+    const vol = this.isSpeakerOn ? 1.0 : 0.72;
+    if (remoteVideo) {
+      remoteVideo.muted = false;
+      remoteVideo.volume = vol;
+    }
+    if (remoteAudio) {
+      remoteAudio.muted = false;
+      remoteAudio.volume = vol;
+    }
+    if (this.speakerGainNode && this.callAudioCtx) {
+      this.speakerGainNode.gain.setValueAtTime(this.isSpeakerOn ? 3.2 : 1.0, this.callAudioCtx.currentTime);
+    }
+
+    // Cihaz destekliyorsa (Android Chrome / Masaüstü) ses çıkış donanımını (setSinkId) hoparlöre veya ahizeye yönlendir
+    if (navigator.mediaDevices && typeof navigator.mediaDevices.enumerateDevices === 'function') {
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const outputs = devices.filter((d) => d.kind === 'audiooutput' && d.deviceId);
+        if (outputs.length > 0) {
+          let preferred = null;
+          if (this.isSpeakerOn) {
+            preferred =
+              outputs.find((d) => /speaker|hoparlör|hands-free|loud/i.test(d.label || '')) ||
+              outputs.find((d) => d.deviceId === 'default') ||
+              outputs[outputs.length - 1];
+          } else {
+            preferred =
+              outputs.find((d) => /earpiece|ahize|receiver|communications/i.test(d.label || '')) ||
+              outputs[0];
+          }
+          if (preferred && preferred.deviceId) {
+            if (remoteVideo && typeof remoteVideo.setSinkId === 'function') {
+              await remoteVideo.setSinkId(preferred.deviceId).catch(() => {});
+            }
+            if (remoteAudio && typeof remoteAudio.setSinkId === 'function') {
+              await remoteAudio.setSinkId(preferred.deviceId).catch(() => {});
+            }
+          }
+        }
+      } catch {}
+    }
+  },
+
+  async toggleCallSpeaker() {
+    this.isSpeakerOn = !this.isSpeakerOn;
+    this.ensureCallAudioContext();
+    await this.applyAudioOutputRouting();
+    this.toast(
+      this.isSpeakerOn
+        ? '🔊 Sesi dışarı verme (Hoparlör) açıldı!'
+        : '🔈 Normal ahize sesine geçildi.'
+    );
+  },
+
+  attachStreamToAudioAmplifier(stream) {
+    try {
+      if (!stream || stream.getAudioTracks().length === 0) return;
+      const ctx = this.ensureCallAudioContext();
+      if (this.remoteStreamSource) {
+        try { this.remoteStreamSource.disconnect(); } catch {}
+      }
+      this.remoteStreamSource = ctx.createMediaStreamSource(stream);
+      this.remoteStreamSource.connect(this.speakerGainNode);
+    } catch {}
+  },
+
+  async flushPendingIceCandidates() {
+    if (!this.peerConnection || !this.peerConnection.remoteDescription) return;
+    const queue = this.pendingIceCandidates.splice(0, this.pendingIceCandidates.length);
+    for (const cand of queue) {
+      try {
+        await this.peerConnection.addIceCandidate(new RTCIceCandidate(cand));
+      } catch {}
+    }
+  },
+
   async createPeerConnection(targetUserId, convId, callType) {
+    if (this.peerConnection) {
+      try { this.peerConnection.close(); } catch {}
+    }
+
     const pc = new RTCPeerConnection({
-      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+        { urls: 'stun:stun2.l.google.com:19302' },
+        { urls: 'stun:stun.cloudflare.com:3478' },
+        {
+          urls: [
+            'turn:openrelay.metered.ca:80',
+            'turn:openrelay.metered.ca:443',
+            'turn:openrelay.metered.ca:443?transport=tcp'
+          ],
+          username: 'openrelayproject',
+          credential: 'openrelayproject'
+        }
+      ]
     });
+
+    this.remoteStream = new MediaStream();
 
     pc.onicecandidate = (ev) => {
       if (ev.candidate && this.ws && this.ws.readyState === WebSocket.OPEN) {
@@ -2117,17 +2348,214 @@ const App = {
       }
     };
 
-    pc.ontrack = (ev) => {
-      const remoteVideo = document.getElementById('remote-video');
-      if (ev.streams && ev.streams[0]) {
-        remoteVideo.srcObject = ev.streams[0];
-        if (callType === 'video') {
-          document.getElementById('call-avatar-placeholder').classList.add('hidden');
+    pc.onconnectionstatechange = () => {
+      if (!pc) return;
+      if (pc.connectionState === 'connected') {
+        this.stopRingTone();
+        document.getElementById('call-status-label').textContent = '🟢 Görüşme Aktif (Bağlandı)';
+        if (!this.callTimerInterval) {
+          this.startCallTimer();
         }
       }
     };
 
+    pc.ontrack = (ev) => {
+      const remoteVideo = document.getElementById('remote-video');
+      const remoteAudio = document.getElementById('remote-audio');
+      const stream = (ev.streams && ev.streams[0]) ? ev.streams[0] : this.remoteStream;
+
+      if (ev.track && stream === this.remoteStream) {
+        this.remoteStream.addTrack(ev.track);
+      }
+
+      if (ev.track && ev.track.kind === 'audio') {
+        this.webrtcAudioReceived = true;
+      }
+      if (ev.track && ev.track.kind === 'video') {
+        this.webrtcVideoReceived = true;
+      }
+
+      if (remoteVideo && remoteVideo.srcObject !== stream) {
+        remoteVideo.srcObject = stream;
+      }
+      if (remoteAudio && remoteAudio.srcObject !== stream) {
+        remoteAudio.srcObject = stream;
+      }
+
+      this.applyAudioOutputRouting();
+      this.attachStreamToAudioAmplifier(stream);
+
+      if (remoteVideo) remoteVideo.play().catch(() => {});
+      if (remoteAudio) remoteAudio.play().catch(() => {});
+
+      if (callType === 'video' || (ev.track && ev.track.kind === 'video')) {
+        document.getElementById('call-avatar-placeholder').classList.add('hidden');
+        document.getElementById('remote-video-relay')?.classList.add('hidden');
+      }
+    };
+
     return pc;
+  },
+
+  startWebSocketMediaRelay() {
+    this.stopWebSocketMediaRelay();
+    if (!this.localStream || !this.activeCall) return;
+
+    // 1. Canlı Ses Rölesi (Mobil 4.5G/5G CGNAT arkasında WebRTC UDP engellendiğinde bile sesin kesintisiz gitmesini sağlar)
+    try {
+      const audioTracks = this.localStream.getAudioTracks();
+      if (audioTracks.length > 0) {
+        const ctx = this.ensureCallAudioContext();
+        const source = ctx.createMediaStreamSource(new MediaStream([audioTracks[0]]));
+        const proc = ctx.createScriptProcessor(4096, 1, 1);
+        const inRate = ctx.sampleRate || 48000;
+        const outRate = 8000;
+        const ratio = inRate / outRate;
+
+        proc.onaudioprocess = (e) => {
+          if (!this.activeCall || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+          const track = this.localStream && this.localStream.getAudioTracks()[0];
+          if (!track || !track.enabled) return;
+
+          const input = e.inputBuffer.getChannelData(0);
+          const outLen = Math.floor(input.length / ratio);
+          const pcm16 = new Int16Array(outLen);
+          let maxAmp = 0;
+          for (let i = 0; i < outLen; i++) {
+            const s = Math.max(-1, Math.min(1, input[Math.floor(i * ratio)] || 0));
+            if (Math.abs(s) > maxAmp) maxAmp = Math.abs(s);
+            pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+          }
+          // Sessizlikte gereksiz paket gönderme
+          if (maxAmp < 0.008) return;
+
+          const bytes = new Uint8Array(pcm16.buffer);
+          let bin = '';
+          for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+
+          this.ws.send(JSON.stringify({
+            type: 'call-media',
+            mediaType: 'audio',
+            conversationId: this.activeCall.convId,
+            targetUserId: this.activeCall.targetUserId,
+            sampleRate: outRate,
+            pcmBase64: btoa(bin)
+          }));
+        };
+
+        const zeroGain = ctx.createGain();
+        zeroGain.gain.value = 0;
+        source.connect(proc);
+        proc.connect(zeroGain);
+        zeroGain.connect(ctx.destination);
+        this.wsAudioProcessor = { source, proc, zeroGain };
+      }
+    } catch {}
+
+    // 2. Canlı Görüntü Rölesi (Görüntülü aramalarda CGNAT arkasında bile canlı kamera karesi aktarır)
+    if (this.activeCall.callType === 'video') {
+      const canvas = document.createElement('canvas');
+      canvas.width = 240;
+      canvas.height = 320;
+      const ctx2d = canvas.getContext('2d');
+
+      this.wsVideoInterval = setInterval(() => {
+        if (!this.activeCall || this.webrtcVideoReceived || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+        const localVideo = document.getElementById('local-video');
+        const vTrack = this.localStream && this.localStream.getVideoTracks()[0];
+        if (!localVideo || !vTrack || !vTrack.enabled || localVideo.readyState < 2) return;
+
+        try {
+          ctx2d.drawImage(localVideo, 0, 0, canvas.width, canvas.height);
+          const frameDataUrl = canvas.toDataURL('image/jpeg', 0.45);
+          this.ws.send(JSON.stringify({
+            type: 'call-media',
+            mediaType: 'video',
+            conversationId: this.activeCall.convId,
+            targetUserId: this.activeCall.targetUserId,
+            frameDataUrl
+          }));
+        } catch {}
+      }, 260);
+    }
+  },
+
+  stopWebSocketMediaRelay() {
+    if (this.wsAudioProcessor) {
+      try {
+        this.wsAudioProcessor.source.disconnect();
+        this.wsAudioProcessor.proc.disconnect();
+        this.wsAudioProcessor.zeroGain.disconnect();
+      } catch {}
+      this.wsAudioProcessor = null;
+    }
+    if (this.wsVideoInterval) {
+      clearInterval(this.wsVideoInterval);
+      this.wsVideoInterval = null;
+    }
+  },
+
+  handleRemoteCallMedia(ev) {
+    if (!this.activeCall) return;
+
+    if (ev.mediaType === 'audio' && ev.pcmBase64 && !this.webrtcAudioReceived) {
+      try {
+        const ctx = this.ensureCallAudioContext();
+        const bin = atob(ev.pcmBase64);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        const pcm16 = new Int16Array(bytes.buffer);
+        const sampleRate = Number(ev.sampleRate || 8000);
+
+        const audioBuf = ctx.createBuffer(1, pcm16.length, sampleRate);
+        const channel = audioBuf.getChannelData(0);
+        for (let i = 0; i < pcm16.length; i++) {
+          channel[i] = pcm16[i] / 32768.0;
+        }
+
+        const src = ctx.createBufferSource();
+        src.buffer = audioBuf;
+        src.connect(this.speakerGainNode);
+
+        const now = ctx.currentTime;
+        if (this.nextPlayTime < now || this.nextPlayTime > now + 0.6) {
+          this.nextPlayTime = now + 0.04;
+        }
+        src.start(this.nextPlayTime);
+        this.nextPlayTime += audioBuf.duration;
+      } catch {}
+    } else if (ev.mediaType === 'video' && ev.frameDataUrl && !this.webrtcVideoReceived) {
+      const relayImg = document.getElementById('remote-video-relay');
+      if (relayImg) {
+        relayImg.src = ev.frameDataUrl;
+        relayImg.classList.remove('hidden');
+        document.getElementById('call-avatar-placeholder')?.classList.add('hidden');
+      }
+    }
+  },
+
+  async acquireCallMediaStream(callType) {
+    if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== 'function') {
+      return null;
+    }
+    try {
+      return await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        },
+        video: callType === 'video' ? { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } } : false
+      });
+    } catch {
+      if (callType === 'video') {
+        try {
+          this.toast('Kamera açılamadı, mikrofon ile sesli olarak bağlanılıyor...');
+          return await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        } catch {}
+      }
+      return null;
+    }
   },
 
   async startCall(callType = 'audio') {
@@ -2135,28 +2563,35 @@ const App = {
     if (!conv) return;
 
     const targetUserId = conv.peer ? conv.peer.user_id : null;
-    this.activeCall = { convId: conv.id, targetUserId, callType, startTime: Date.now() };
+    const isPeerOnline = conv.type === 'direct' ? Boolean(conv.peer && conv.peer.online) : true;
+    this.pendingIceCandidates = [];
+    this.webrtcAudioReceived = false;
+    this.webrtcVideoReceived = false;
+    this.isSpeakerOn = callType === 'video';
+    this.ensureCallAudioContext();
+    await this.applyAudioOutputRouting();
+
+    this.activeCall = { convId: conv.id, targetUserId, callType, startTime: Date.now(), connected: false };
 
     document.getElementById('call-overlay').classList.remove('hidden');
     document.getElementById('incoming-call-controls').classList.add('hidden');
     document.getElementById('active-call-controls').classList.remove('hidden');
     document.getElementById('call-avatar-placeholder').classList.remove('hidden');
+    document.getElementById('remote-video-relay')?.classList.add('hidden');
+    document.getElementById('call-timer-text').textContent = '00:00';
     document.getElementById('call-peer-name').textContent = conv.title;
     document.getElementById('call-peer-avatar').textContent = (conv.title || '?')[0].toUpperCase();
-    document.getElementById('call-status-label').textContent =
-      callType === 'video' ? '📹 Görüntülü aranıyor...' : '📞 Görüntüsüz (Sesli) aranıyor...';
+    document.getElementById('call-status-label').textContent = isPeerOnline
+      ? (callType === 'video' ? '📹 Görüntülü çalıyor... (Cevap bekleniyor)' : '📞 Sesli çalıyor... (Cevap bekleniyor)')
+      : '🔴 Kişi şu an çevrimdışı — Çağrı iletiliyor...';
 
-    this.startCallTimer();
+    this.startRingTone('outgoing');
 
-    try {
-      this.localStream = await navigator.mediaDevices.getUserMedia({
-        audio: true,
-        video: callType === 'video'
-      });
-      document.getElementById('local-video').srcObject = this.localStream;
-    } catch {
-      this.localStream = null;
-      this.toast('Kamera/mikrofon izni olmadan sinyalizasyon modunda arama başlatıldı.');
+    this.localStream = await this.acquireCallMediaStream(callType);
+    const localVideo = document.getElementById('local-video');
+    if (localVideo) {
+      localVideo.srcObject = this.localStream;
+      localVideo.classList.toggle('hidden', callType !== 'video');
     }
 
     this.peerConnection = await this.createPeerConnection(targetUserId, conv.id, callType);
@@ -2178,12 +2613,17 @@ const App = {
         callType,
         sdp: offer
       }));
+    } else {
+      this.toast('Sunucu bağlantısı yenileniyor, lütfen tekrar deneyin.', 'error');
     }
   },
 
   async handleIncomingCallOffer(ev) {
     this.incomingOffer = ev;
-    this.playBeep(880, 0.25);
+    this.pendingIceCandidates = [];
+    this.webrtcAudioReceived = false;
+    this.webrtcVideoReceived = false;
+    this.startRingTone('incoming');
 
     if (document.hidden && 'serviceWorker' in navigator && Notification.permission === 'granted') {
       const reg = await navigator.serviceWorker.ready;
@@ -2200,35 +2640,42 @@ const App = {
     document.getElementById('incoming-call-controls').classList.remove('hidden');
     document.getElementById('active-call-controls').classList.add('hidden');
     document.getElementById('call-avatar-placeholder').classList.remove('hidden');
+    document.getElementById('remote-video-relay')?.classList.add('hidden');
+    document.getElementById('call-timer-text').textContent = '00:00';
     document.getElementById('call-peer-name').textContent = ev.fromDisplayName || 'Gelen Arama';
     document.getElementById('call-peer-avatar').textContent = (ev.fromDisplayName || 'A')[0];
     document.getElementById('call-status-label').textContent =
-      ev.callType === 'video' ? '📹 Gelen Görüntülü Arama...' : '📞 Gelen Sesli Arama...';
+      ev.callType === 'video' ? '📹 Gelen Görüntülü Arama... (Cevapla butonuna dokunun)' : '📞 Gelen Sesli Arama... (Cevapla butonuna dokunun)';
   },
 
   async acceptIncomingCall() {
     if (!this.incomingOffer) return;
+    this.stopRingTone();
     const ev = this.incomingOffer;
+    this.incomingOffer = null;
+
+    this.isSpeakerOn = ev.callType === 'video';
+    this.ensureCallAudioContext();
+    await this.applyAudioOutputRouting();
+
     this.activeCall = {
       convId: ev.conversationId,
       targetUserId: ev.fromUserId,
       callType: ev.callType,
-      startTime: Date.now()
+      startTime: Date.now(),
+      connected: true
     };
 
     document.getElementById('incoming-call-controls').classList.add('hidden');
     document.getElementById('active-call-controls').classList.remove('hidden');
-    document.getElementById('call-status-label').textContent = 'Bağlandı';
+    document.getElementById('call-status-label').textContent = '🟢 Görüşme Aktif (Bağlandı)';
     this.startCallTimer();
 
-    try {
-      this.localStream = await navigator.mediaDevices.getUserMedia({
-        audio: true,
-        video: ev.callType === 'video'
-      });
-      document.getElementById('local-video').srcObject = this.localStream;
-    } catch {
-      this.localStream = null;
+    this.localStream = await this.acquireCallMediaStream(ev.callType);
+    const localVideo = document.getElementById('local-video');
+    if (localVideo) {
+      localVideo.srcObject = this.localStream;
+      localVideo.classList.toggle('hidden', ev.callType !== 'video');
     }
 
     this.peerConnection = await this.createPeerConnection(ev.fromUserId, ev.conversationId, ev.callType);
@@ -2237,6 +2684,8 @@ const App = {
     }
 
     await this.peerConnection.setRemoteDescription(new RTCSessionDescription(ev.sdp));
+    await this.flushPendingIceCandidates();
+
     const answer = await this.peerConnection.createAnswer();
     await this.peerConnection.setLocalDescription(answer);
 
@@ -2248,10 +2697,12 @@ const App = {
         sdp: answer
       }));
     }
-    this.incomingOffer = null;
+
+    this.startWebSocketMediaRelay();
   },
 
   rejectIncomingCall() {
+    this.stopRingTone();
     if (this.incomingOffer && this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify({
         type: 'call-reject',
@@ -2264,17 +2715,29 @@ const App = {
   },
 
   async handleCallAnswer(ev) {
-    document.getElementById('call-status-label').textContent = 'Görüşme Aktif 🔒';
+    this.stopRingTone();
+    if (this.activeCall) {
+      this.activeCall.connected = true;
+    }
+    document.getElementById('call-status-label').textContent = '🟢 Görüşme Aktif (Bağlandı)';
+    this.startCallTimer();
+
     if (this.peerConnection && ev.sdp) {
       await this.peerConnection.setRemoteDescription(new RTCSessionDescription(ev.sdp));
+      await this.flushPendingIceCandidates();
     }
+
+    this.startWebSocketMediaRelay();
   },
 
   async handleRemoteIce(ev) {
-    if (this.peerConnection && ev.candidate) {
+    if (!ev || !ev.candidate) return;
+    if (this.peerConnection && this.peerConnection.remoteDescription) {
       try {
         await this.peerConnection.addIceCandidate(new RTCIceCandidate(ev.candidate));
       } catch {}
+    } else {
+      this.pendingIceCandidates.push(ev.candidate);
     }
   },
 
@@ -2294,7 +2757,11 @@ const App = {
     const track = this.localStream.getAudioTracks()[0];
     if (track) {
       track.enabled = !track.enabled;
-      this.toast(track.enabled ? 'Mikrofon açıldı' : 'Mikrofon sessize alındı');
+      const btn = document.getElementById('btn-toggle-mic');
+      if (btn) {
+        btn.textContent = track.enabled ? '🎤 Mikrofon' : '🔇 Sessizde';
+      }
+      this.toast(track.enabled ? '🎤 Mikrofon açıldı' : '🔇 Mikrofon sessize alındı');
     }
   },
 
@@ -2303,7 +2770,11 @@ const App = {
     const track = this.localStream.getVideoTracks()[0];
     if (track) {
       track.enabled = !track.enabled;
-      this.toast(track.enabled ? 'Kamera açıldı' : 'Kamera kapatıldı');
+      const btn = document.getElementById('btn-toggle-cam');
+      if (btn) {
+        btn.textContent = track.enabled ? '📷 Kamera' : '🚫 Kamera Kapalı';
+      }
+      this.toast(track.enabled ? '📷 Kamera açıldı' : '🚫 Kamera kapatıldı');
     }
   },
 
@@ -2322,7 +2793,14 @@ const App = {
   },
 
   async endCall(notifyRemote = true) {
+    this.stopRingTone();
+    this.stopWebSocketMediaRelay();
     clearInterval(this.callTimerInterval);
+    this.callTimerInterval = null;
+    this.pendingIceCandidates = [];
+    this.webrtcAudioReceived = false;
+    this.webrtcVideoReceived = false;
+
     if (notifyRemote && this.activeCall && this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify({
         type: 'call-end',
@@ -2342,9 +2820,19 @@ const App = {
       this.localStream = null;
     }
     if (this.peerConnection) {
-      this.peerConnection.close();
+      try { this.peerConnection.close(); } catch {}
       this.peerConnection = null;
     }
+    const remoteVideo = document.getElementById('remote-video');
+    if (remoteVideo) remoteVideo.srcObject = null;
+    const remoteAudio = document.getElementById('remote-audio');
+    if (remoteAudio) remoteAudio.srcObject = null;
+    const relayImg = document.getElementById('remote-video-relay');
+    if (relayImg) {
+      relayImg.src = '';
+      relayImg.classList.add('hidden');
+    }
+
     this.activeCall = null;
     document.getElementById('call-overlay').classList.add('hidden');
   },

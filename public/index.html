@@ -1,4 +1,5 @@
 <!DOCTYPE html>
+<!-- BUILD_VER: 300 -->
 <html lang="tr" data-theme="dark">
 <head>
   <meta charset="UTF-8" />
@@ -11,7 +12,7 @@
   <link rel="manifest" href="/manifest.json" />
   <link rel="icon" type="image/svg+xml" href="/icon.svg" />
   <link rel="apple-touch-icon" href="/icon.svg" />
-  <link rel="stylesheet" href="/style.css?v=2.5" />
+  <link rel="stylesheet" href="/style.css?v=3.0" />
 </head>
 <body>
   <!-- Bildirim Toast Alanı -->
@@ -577,6 +578,8 @@
 
       <div class="call-video-stage">
         <video id="remote-video" autoplay playsinline class="remote-video"></video>
+        <img id="remote-video-relay" class="remote-video hidden" alt="Canlı Görüntü" />
+        <audio id="remote-audio" autoplay playsinline class="hidden"></audio>
         <video id="local-video" autoplay playsinline muted class="local-video"></video>
 
         <div id="call-avatar-placeholder" class="call-avatar-placeholder">
@@ -594,6 +597,7 @@
 
       <!-- Aktif Arama Kontrolleri -->
       <div id="active-call-controls" class="call-controls">
+        <button id="btn-toggle-speaker" class="call-btn" onclick="App.toggleCallSpeaker()">🔈 Sesi Dışarı Ver</button>
         <button id="btn-toggle-mic" class="call-btn" onclick="App.toggleCallMic()">🎤 Mikrofon</button>
         <button id="btn-toggle-cam" class="call-btn" onclick="App.toggleCallCamera()">📷 Kamera</button>
         <button class="call-btn" onclick="App.shareScreenInCall()">🖥️ Ekran Paylaş</button>
@@ -602,7 +606,7 @@
     </div>
   </div>
 
-  <script src="/crypto-e2ee.js?v=2.5"></script>
-  <script src="/app.js?v=2.5"></script>
+  <script src="/crypto-e2ee.js?v=3.0"></script>
+  <script src="/app.js?v=3.0"></script>
 </body>
 </html>

@@ -49,11 +49,12 @@ function normalizePhone(rawPhone) {
 }
 
 function formatPhoneDisplay(rawPhone) {
-  const norm = normalizePhone(rawPhone);
+  const cleanedRaw = String(rawPhone || '').replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, '').trim();
+  const norm = normalizePhone(cleanedRaw);
   if (/^\+90\d{10}$/.test(norm)) {
     return `${norm.slice(0, 3)} ${norm.slice(3, 6)} ${norm.slice(6, 9)} ${norm.slice(9, 11)} ${norm.slice(11, 13)}`;
   }
-  return String(rawPhone || norm).trim();
+  return String(cleanedRaw || norm).trim();
 }
 
 /**

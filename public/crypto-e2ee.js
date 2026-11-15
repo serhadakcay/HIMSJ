@@ -1,3 +1,4 @@
+// BUILD_VER: 300
 /**
  * İstemci Tarafı Uçtan Uca Şifreleme (E2EE) Modülü
  * Doküman Bölüm 5:
