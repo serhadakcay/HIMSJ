@@ -3,7 +3,7 @@
  * Uygulama kapatılsa bile arka planda yeni mesaj ve aramaları kontrol eder ve bildirim gösterir.
  */
 
-const CACHE_NAME = 'mesajlasma-pwa-v4';
+const CACHE_NAME = 'mesajlasma-pwa-v5';
 const ASSETS = [
   '/',
   '/index.html',

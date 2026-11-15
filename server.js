@@ -10,15 +10,127 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { URL } = require('node:url');
 
-const {
-  db,
-  hashPassword,
-  verifyPassword,
-  generateFingerprint,
-  normalizePhone,
-  formatPhoneDisplay,
-  buildInvitePayload
-} = require('./db');
+const dbModule = require('./db');
+const db = dbModule.db;
+
+function normalizePhone(rawPhone) {
+  if (typeof dbModule.normalizePhone === 'function') {
+    return dbModule.normalizePhone(rawPhone);
+  }
+  if (!rawPhone) return '';
+  let digits = String(rawPhone).replace(/\D/g, '');
+  if (!digits) return '';
+  if (digits.startsWith('00')) digits = digits.slice(2);
+  if (digits.length === 10 && !digits.startsWith('90')) digits = '90' + digits;
+  else if (digits.length === 11 && digits.startsWith('0')) digits = '90' + digits.slice(1);
+  else if (digits.length === 13 && digits.startsWith('900')) digits = '90' + digits.slice(3);
+  return '+' + digits;
+}
+
+function formatPhoneDisplay(rawPhone) {
+  if (typeof dbModule.formatPhoneDisplay === 'function') {
+    return dbModule.formatPhoneDisplay(rawPhone);
+  }
+  const norm = normalizePhone(rawPhone);
+  if (/^\+90\d{10}$/.test(norm)) {
+    return `${norm.slice(0, 3)} ${norm.slice(3, 6)} ${norm.slice(6, 9)} ${norm.slice(9, 11)} ${norm.slice(11, 13)}`;
+  }
+  return String(rawPhone || norm).trim();
+}
+
+function buildInvitePayload(opts = {}) {
+  if (typeof dbModule.buildInvitePayload === 'function') {
+    return dbModule.buildInvitePayload(opts);
+  }
+  const { targetPhone, targetName, senderName, senderPhone, appUrl, allPhones } = opts;
+  const norm = normalizePhone(targetPhone);
+  const displayPhone = formatPhoneDisplay(targetPhone || norm);
+  const waDigits = norm.replace(/\D/g, '');
+  const phonesLabel = Array.isArray(allPhones) && allPhones.length > 0
+    ? allPhones.map((p) => formatPhoneDisplay(p)).join(', ')
+    : displayPhone;
+  const senderLabel = senderName
+    ? (senderPhone ? `${senderName} (${formatPhoneDisplay(senderPhone)})` : senderName)
+    : (senderPhone ? formatPhoneDisplay(senderPhone) : 'Kullanıcı');
+  const urlPart = appUrl ? ` Uygulama giriş adresi: ${appUrl}` : '';
+
+  const messageText = `${phonesLabel} — ${senderLabel}: Bu numaraları kullanıcı sizi programı kullanmak için ekledi.${urlPart}`;
+  const encodedText = encodeURIComponent(messageText);
+
+  const whatsappUrl = waDigits
+    ? `https://wa.me/${waDigits}?text=${encodedText}`
+    : `https://wa.me/?text=${encodedText}`;
+  const smsUrl = norm
+    ? `sms:${norm}?body=${encodedText}`
+    : `sms:?body=${encodedText}`;
+
+  return {
+    phone: displayPhone,
+    phoneNormalized: norm,
+    name: targetName || displayPhone,
+    messageText,
+    whatsappUrl,
+    smsUrl
+  };
+}
+
+function hashPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
+  if (typeof dbModule.hashPassword === 'function') {
+    return dbModule.hashPassword(password, salt);
+  }
+  const hash = crypto.scryptSync(String(password), salt, 64).toString('hex');
+  return { hash, salt };
+}
+
+function verifyPassword(password, hash, salt) {
+  if (typeof dbModule.verifyPassword === 'function') {
+    return dbModule.verifyPassword(password, hash, salt);
+  }
+  const computed = crypto.scryptSync(String(password), salt, 64).toString('hex');
+  try {
+    return crypto.timingSafeEqual(Buffer.from(computed, 'hex'), Buffer.from(hash, 'hex'));
+  } catch {
+    return false;
+  }
+}
+
+function generateFingerprint(inputStr) {
+  if (typeof dbModule.generateFingerprint === 'function') {
+    return dbModule.generateFingerprint(inputStr);
+  }
+  const digest = crypto.createHash('sha256').update(String(inputStr || '')).digest();
+  const groups = [];
+  for (let i = 0; i < 12; i++) {
+    const num = digest.readUInt16BE(i * 2) % 100000;
+    groups.push(String(num).padStart(5, '0'));
+  }
+  return groups.join(' ');
+}
+
+// Eski db.js sürümleriyle bile tam uyumluluk için eksik sütunları otomatik ekle ve demo kayıtları temizle
+try {
+  const userCols = db.prepare('PRAGMA table_info(users)').all().map((c) => c.name);
+  if (!userCols.includes('phone')) db.exec("ALTER TABLE users ADD COLUMN phone TEXT DEFAULT ''");
+  if (!userCols.includes('phone_normalized')) db.exec("ALTER TABLE users ADD COLUMN phone_normalized TEXT DEFAULT ''");
+  if (!userCols.includes('is_registered')) db.exec('ALTER TABLE users ADD COLUMN is_registered INTEGER DEFAULT 1');
+
+  const contactCols = db.prepare('PRAGMA table_info(contacts)').all().map((c) => c.name);
+  if (!contactCols.includes('contact_name')) db.exec("ALTER TABLE contacts ADD COLUMN contact_name TEXT DEFAULT ''");
+  if (!contactCols.includes('contact_phone')) db.exec("ALTER TABLE contacts ADD COLUMN contact_phone TEXT DEFAULT ''");
+  if (!contactCols.includes('contact_phone_normalized')) db.exec("ALTER TABLE contacts ADD COLUMN contact_phone_normalized TEXT DEFAULT ''");
+  if (!contactCols.includes('invited_via')) db.exec("ALTER TABLE contacts ADD COLUMN invited_via TEXT DEFAULT ''");
+  if (!contactCols.includes('invited_at')) db.exec('ALTER TABLE contacts ADD COLUMN invited_at TEXT');
+
+  db.exec(`
+    DELETE FROM users WHERE id IN ('usr_serhad', 'usr_ayse', 'usr_mehmet', 'usr_zeynep', 'usr_can');
+    DELETE FROM conversations WHERE id IN ('conv_proje_ekibi', 'conv_duyuru_kanali', 'conv_dm_ayse');
+  `);
+
+  const usersWithoutNorm = db.prepare("SELECT id, phone FROM users WHERE phone != '' AND (phone_normalized IS NULL OR phone_normalized = '')").all();
+  for (const u of usersWithoutNorm) {
+    db.prepare('UPDATE users SET phone_normalized = ? WHERE id = ?').run(normalizePhone(u.phone), u.id);
+  }
+} catch {}
 
 let getLocalIPs, ensureTlsCertificate, generateQrSvg;
 try {
@@ -1162,6 +1274,7 @@ async function handleRequest(req, res) {
         `);
 
         const validItems = [];
+        const seenTargetIds = new Set();
         for (const item of rawList) {
           if (!item) continue;
           const itemName = Array.isArray(item.name)
@@ -1179,11 +1292,17 @@ async function handleRequest(req, res) {
           if (nonEmptyPhones.length > 0) {
             for (const p of nonEmptyPhones) {
               const resObj = ensureContactUserByPhone(itemName, p);
-              if (resObj) validItems.push(resObj);
+              if (resObj && !seenTargetIds.has(resObj.targetUser.id)) {
+                seenTargetIds.add(resObj.targetUser.id);
+                validItems.push(resObj);
+              }
             }
           } else if (itemName) {
             const resObj = ensureContactUserByPhone(itemName, '');
-            if (resObj) validItems.push(resObj);
+            if (resObj && !seenTargetIds.has(resObj.targetUser.id)) {
+              seenTargetIds.add(resObj.targetUser.id);
+              validItems.push(resObj);
+            }
           }
         }
 

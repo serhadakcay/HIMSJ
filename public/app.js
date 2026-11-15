@@ -75,7 +75,7 @@ const App = {
 
     if ('serviceWorker' in navigator) {
       try {
-        const reg = await navigator.serviceWorker.register('/sw.js?v=2.4');
+        const reg = await navigator.serviceWorker.register('/sw.js?v=2.5');
         reg.update().catch(() => {});
         if (this.token && reg.active) {
           reg.active.postMessage({ type: 'SET_BG_TOKEN', token: this.token });
@@ -934,6 +934,7 @@ const App = {
 
   switchNav(nav) {
     this.currentNav = nav;
+    document.body.classList.remove('mobile-chat-open');
     document.querySelectorAll('.nav-item').forEach((btn) => {
       btn.classList.toggle('active', btn.dataset.nav === nav);
     });
