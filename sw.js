@@ -1,19 +1,10 @@
-// BUILD_VER: 300
+// BUILD_VER: 400
 /**
  * Mesajlaşma Uygulaması - Service Worker (Arka Planda Çalışma ve Bildirim Motoru)
  * Uygulama kapatılsa bile arka planda yeni mesaj ve aramaları kontrol eder ve bildirim gösterir.
  */
 
-const CACHE_NAME = 'mesajlasma-pwa-v6';
-const ASSETS = [
-  '/',
-  '/index.html',
-  '/style.css',
-  '/crypto-e2ee.js',
-  '/app.js',
-  '/icon.svg',
-  '/manifest.json'
-];
+const CACHE_NAME = 'mesajlasma-pwa-v7';
 
 let bgToken = '';
 let lastPollIso = new Date().toISOString();
@@ -23,15 +14,25 @@ let bgInterval = null;
 self.addEventListener('install', (event) => {
   self.skipWaiting();
   event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => cache.addAll(ASSETS)).catch(() => {})
+    caches.keys().then((keys) => Promise.all(keys.map((k) => caches.delete(k)))).catch(() => {})
   );
 });
 
 self.addEventListener('activate', (event) => {
   event.waitUntil(
-    caches.keys().then((keys) =>
-      Promise.all(keys.map((k) => (k !== CACHE_NAME ? caches.delete(k) : Promise.resolve())))
-    ).then(() => self.clients.claim())
+    (async () => {
+      try {
+        const keys = await caches.keys();
+        await Promise.all(keys.map((k) => caches.delete(k)));
+      } catch {}
+      await self.clients.claim();
+      const clientList = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+      for (const client of clientList) {
+        try {
+          client.postMessage({ type: 'SW_FORCE_RELOAD', buildVer: 400 });
+        } catch {}
+      }
+    })()
   );
 });
 

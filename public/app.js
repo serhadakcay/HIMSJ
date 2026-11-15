@@ -1,7 +1,7 @@
-// BUILD_VER: 300
+// BUILD_VER: 400
 /**
- * Mesajlaşma Uygulaması - İstemci Uygulama Mantığı (v3.0)
- * - Cep Telefonu Rehberinden Kişi Ekleme (Contact Picker API + VCF + Toplu Metin + Manuel)
+ * Mesajlaşma Uygulaması - İstemci Uygulama Mantığı (v4.0)
+ * - Cep Telefonu Rehberinden Kişi Ekleme (Contact Picker API + Anında Optimistik Kayıt + VCF + Toplu Metin + Manuel)
  * - Numara veya Rehberden Eklenen Kişilere SMS ve WhatsApp Mesajı Gönderme
  *   ("............ Bu numaraları kullanıcı sizi programı kullanmak için ekledi")
  * - Kaydedilen Kişiler Programı Kullandığında Otomatik Numara ve Hesap Entegrasyonu
@@ -65,6 +65,19 @@ const App = {
     const savedTheme = localStorage.getItem('msj_theme') || 'dark';
     document.documentElement.setAttribute('data-theme', savedTheme);
 
+    // Eski önbellekleri temizle
+    if ('caches' in window) {
+      caches.keys().then((keys) => keys.forEach((k) => caches.delete(k))).catch(() => {});
+    }
+
+    // Yedek kullanıcı profilini yükle (Render konteyner sıfırlamalarında oturumu otomatik onarmak için)
+    try {
+      const savedProfile = localStorage.getItem('msj_user_profile');
+      if (savedProfile && !this.user) {
+        this.user = JSON.parse(savedProfile);
+      }
+    } catch {}
+
     // HTTPS geçişinde oturum anahtarını (auth_token) URL'den devral
     let autoOpenContacts = false;
     try {
@@ -89,7 +102,15 @@ const App = {
 
     if ('serviceWorker' in navigator) {
       try {
-        const reg = await navigator.serviceWorker.register('/sw.js?v=3.0');
+        navigator.serviceWorker.addEventListener('message', (ev) => {
+          if (ev.data && ev.data.type === 'SW_FORCE_RELOAD') {
+            if (sessionStorage.getItem('msj_sw_reloaded_v4') !== '1') {
+              sessionStorage.setItem('msj_sw_reloaded_v4', '1');
+              window.location.reload();
+            }
+          }
+        });
+        const reg = await navigator.serviceWorker.register('/sw.js?v=4.0');
         reg.update().catch(() => {});
         if (this.token && reg.active) {
           reg.active.postMessage({ type: 'SET_BG_TOKEN', token: this.token });
@@ -101,12 +122,14 @@ const App = {
       try {
         const data = await this.api('/api/auth/me');
         this.user = data.user;
+        localStorage.setItem('msj_user_profile', JSON.stringify(this.user));
         this.keyBundle = await window.E2EE.ensureIdentityKeyPair(this.user.username);
         if (this.keyBundle.publicKey && this.keyBundle.publicKey !== this.user.public_key) {
           const updated = await this.api('/api/auth/profile', 'PUT', {
             public_key: this.keyBundle.publicKey
           });
           this.user = updated.user;
+          localStorage.setItem('msj_user_profile', JSON.stringify(this.user));
         }
         await this.enterApp();
         if (autoOpenContacts) {
@@ -127,6 +150,20 @@ const App = {
     if (this.token) {
       headers['Authorization'] = `Bearer ${this.token}`;
     }
+    try {
+      const prof = this.user || JSON.parse(localStorage.getItem('msj_user_profile') || 'null');
+      if (prof) {
+        headers['X-User-Profile'] = btoa(unescape(encodeURIComponent(JSON.stringify({
+          id: prof.id,
+          username: prof.username,
+          display_name: prof.display_name,
+          phone: prof.phone,
+          avatar_color: prof.avatar_color,
+          public_key: prof.public_key,
+          key_fingerprint: prof.key_fingerprint
+        }))));
+      }
+    } catch {}
     const opts = { method, headers };
     if (body) opts.body = JSON.stringify(body);
     const res = await fetch(url, opts);
@@ -377,31 +414,161 @@ const App = {
     });
   },
 
+  toArraySafe(val) {
+    if (!val) return [];
+    if (Array.isArray(val)) return val;
+    if (typeof val === 'string') return [val];
+    try {
+      return Array.from(val);
+    } catch {
+      return [val];
+    }
+  },
+
+  normalizePhoneClient(rawPhone) {
+    if (!rawPhone) return '';
+    const cleaned = String(rawPhone).replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, '').trim();
+    let digits = cleaned.replace(/\D/g, '');
+    if (!digits) return '';
+    if (digits.startsWith('00')) digits = digits.slice(2);
+    if (digits.length === 10 && !digits.startsWith('90')) digits = '90' + digits;
+    else if (digits.length === 11 && digits.startsWith('0')) digits = '90' + digits.slice(1);
+    else if (digits.length === 13 && digits.startsWith('900')) digits = '90' + digits.slice(3);
+    return '+' + digits;
+  },
+
+  formatPhoneDisplayClient(rawPhone) {
+    const norm = this.normalizePhoneClient(rawPhone);
+    if (!norm) return String(rawPhone || '').trim();
+    const digits = norm.replace(/\D/g, '');
+    if (digits.length === 12 && digits.startsWith('90')) {
+      const local = '0' + digits.slice(2);
+      return `${local.slice(0, 4)} ${local.slice(4, 7)} ${local.slice(7, 9)} ${local.slice(9, 11)}`;
+    }
+    return norm;
+  },
+
+  getSavedLocalContacts() {
+    try {
+      const key = `msj_saved_contacts_${(this.user && this.user.id) || 'default'}`;
+      const raw = localStorage.getItem(key);
+      return raw ? JSON.parse(raw) : [];
+    } catch {
+      return [];
+    }
+  },
+
+  saveContactsLocally(contactsToSave) {
+    try {
+      const key = `msj_saved_contacts_${(this.user && this.user.id) || 'default'}`;
+      const existing = this.getSavedLocalContacts();
+      const map = new Map();
+      for (const c of existing) {
+        const k = c.phoneNormalized || c.phone || c.display_name;
+        if (k) map.set(k, c);
+      }
+      for (const c of contactsToSave || []) {
+        const k = c.phoneNormalized || c.phone || c.display_name;
+        if (k) {
+          const prev = map.get(k) || {};
+          map.set(k, { ...prev, ...c });
+        }
+      }
+      localStorage.setItem(key, JSON.stringify(Array.from(map.values())));
+    } catch {}
+  },
+
+  buildOptimisticContacts(formattedList) {
+    const senderName = (this.user && this.user.display_name) || 'Kullanıcı';
+    const senderPhone = (this.user && this.user.phone) ? ` (${this.user.phone})` : '';
+    const allDisplayPhones = formattedList.map((f) => this.formatPhoneDisplayClient(f.phone || f.name));
+    const phonesLabel = allDisplayPhones.filter(Boolean).join(', ');
+
+    return formattedList.map((f, idx) => {
+      const norm = this.normalizePhoneClient(f.phone) || `+900000000${idx}`;
+      const dispPhone = f.phone ? this.formatPhoneDisplayClient(f.phone) : norm;
+      const dispName = String(f.name || dispPhone || 'Rehber Kişisi').trim();
+      const inviteText = `${phonesLabel || dispPhone} — ${senderName}${senderPhone}: Bu numaraları kullanıcı sizi programı kullanmak için ekledi. Uygulama giriş adresi: ${location.origin}`;
+      const waDigits = norm.replace(/\D/g, '');
+      return {
+        id: f.id || ('local_' + waDigits),
+        conversationId: f.conversationId || null,
+        username: 'tel_' + waDigits.slice(-10),
+        display_name: dispName,
+        real_display_name: dispName,
+        phone: dispPhone,
+        phoneNormalized: norm,
+        avatar_color: '#10b981',
+        isSavedContact: true,
+        isRegistered: Boolean(f.isRegistered),
+        online: Boolean(f.online),
+        inviteText,
+        whatsappUrl: `https://wa.me/${waDigits}?text=${encodeURIComponent(inviteText)}`,
+        smsUrl: `sms:${norm}?body=${encodeURIComponent(inviteText)}`
+      };
+    });
+  },
+
+  applyOptimisticContactsToUi(optimisticContacts) {
+    if (!Array.isArray(optimisticContacts) || optimisticContacts.length === 0) return;
+    this.saveContactsLocally(optimisticContacts);
+    for (const oc of optimisticContacts) {
+      const existsIdx = this.users.findIndex(
+        (u) =>
+          (oc.phoneNormalized && (this.normalizePhoneClient(u.phone) === oc.phoneNormalized || u.phone_normalized === oc.phoneNormalized)) ||
+          u.id === oc.id ||
+          (u.display_name && oc.display_name && u.display_name.toLowerCase() === oc.display_name.toLowerCase())
+      );
+      if (existsIdx === -1) {
+        this.users.unshift(oc);
+      } else {
+        this.users[existsIdx] = {
+          ...this.users[existsIdx],
+          display_name: oc.display_name || this.users[existsIdx].display_name,
+          phone: oc.phone || this.users[existsIdx].phone,
+          isSavedContact: true,
+          inviteText: oc.inviteText || this.users[existsIdx].inviteText,
+          whatsappUrl: oc.whatsappUrl || this.users[existsIdx].whatsappUrl,
+          smsUrl: oc.smsUrl || this.users[existsIdx].smsUrl
+        };
+      }
+    }
+  },
+
   async processPickedPhoneContacts(selected) {
     try {
-      const list = Array.from(selected || []);
+      const list = this.toArraySafe(selected);
       const formatted = [];
+      const seenNormPhones = new Set();
+
       for (const c of list) {
         if (!c) continue;
-        const rawNameArr = Array.isArray(c.name) ? c.name : (c.name ? [c.name] : []);
+        const rawNameArr = this.toArraySafe(c.name);
         const cleanName = rawNameArr
           .map((n) => String(n || '').replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, '').trim())
           .filter(Boolean)
           .join(' ') || String(c.displayName || '').trim();
 
-        const rawTelArr = Array.isArray(c.tel)
-          ? c.tel
-          : (c.tel ? [c.tel] : (Array.isArray(c.phone) ? c.phone : (c.phone ? [c.phone] : [])));
+        const rawTelArr = [
+          ...this.toArraySafe(c.tel),
+          ...this.toArraySafe(c.phone),
+          ...this.toArraySafe(c.phones)
+        ];
         const cleanPhones = rawTelArr
           .map((p) => String(p || '').replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, '').trim())
           .filter(Boolean);
 
         if (cleanPhones.length > 0) {
           for (const tel of cleanPhones) {
-            formatted.push({
-              name: cleanName || tel,
-              phone: tel
-            });
+            const norm = this.normalizePhoneClient(tel) || tel;
+            const dedupKey = `${cleanName.toLowerCase()}|${norm}`;
+            if (!seenNormPhones.has(dedupKey)) {
+              seenNormPhones.add(dedupKey);
+              formatted.push({
+                name: cleanName || this.formatPhoneDisplayClient(tel),
+                phone: tel
+              });
+            }
           }
         } else if (cleanName) {
           formatted.push({
@@ -415,38 +582,42 @@ const App = {
         formatted.push({ name: 'Rehber Kişisi', phone: '' });
       }
 
-      // Kullanıcıya anında görsel geri bildirim ver ve form kutularını da doldur
-      if (formatted.length > 0) {
-        const nameInput = document.getElementById('contact-name-input');
-        const phoneInput = document.getElementById('contact-phone-input');
-        const bulkInput = document.getElementById('bulk-contacts-input');
-        if (nameInput) nameInput.value = formatted[0].name || '';
-        if (phoneInput && formatted[0].phone) phoneInput.value = formatted[0].phone;
-        if (bulkInput && formatted.length > 1) {
-          bulkInput.value = formatted.map((f) => `${f.name} ${f.phone}`.trim()).join('\n');
-        }
+      if (formatted.length === 0) {
+        return;
       }
 
-      this.toast(`⏳ Rehberden seçilen ${formatted.length} kişi kaydediliyor...`);
+      // 1. ANINDA (0ms gecikmeyle) kişiyi ekrana, Rehber sekmesine ve yerel hafızaya ekle!
+      // Böylece sunucu uyansa da sıfırlansa da kişi anında eklenir ve asla eski ekranda kalmaz.
+      const optimisticContacts = this.buildOptimisticContacts(formatted);
+      this.applyOptimisticContactsToUi(optimisticContacts);
 
+      this.closeModal('contact-modal');
+      this.switchNav('contacts');
+      this.renderSidebar();
+      this.toast(`✅ Telefon rehberinizden ${optimisticContacts.length} kişi (${optimisticContacts.map((x) => x.display_name).join(', ')}) eklendi!`);
+      this.openInviteModal({
+        importedCount: optimisticContacts.length,
+        contacts: optimisticContacts,
+        inviteMessage: optimisticContacts[0].inviteText
+      });
+
+      // 2. Arka planda sunucu veritabanıyla senkronize et ve gerçek sohbet/kullanıcı ID'lerini güncelle
       const res = await this.syncContactsWithRetry({
         contacts: formatted,
         inviteChannel: 'auto',
         appUrl: location.origin
       });
 
-      if (!res || !res.importedCount) {
-        this.toast('Seçilen kişilerde kaydedilebilir numara bulunamadı.', 'error');
-        return;
+      if (res && res.contacts && res.contacts.length > 0) {
+        this.saveContactsLocally(res.contacts);
+        await Promise.all([this.loadUsers(), this.loadConversations()]);
+        this.renderSidebar();
+        this.lastInvitedContacts = res.contacts;
+        this.refreshInviteModalLinks();
       }
-
-      this.closeModal('contact-modal');
-      this.toast(`✅ Telefon rehberinizden ${res.importedCount} kişi başarıyla eklendi!`);
-      await Promise.all([this.loadUsers(), this.loadConversations()]);
-      this.switchNav('contacts');
-      this.openInviteModal(res);
     } catch (err) {
-      this.toast('Rehber aktarımı hatası: ' + (err.message || 'Bağlantı hatası'), 'error');
+      // Sunucu geçici olarak yanıt vermese bile kişi yerel rehbere ve ekrana zaten eklendi!
+      this.renderSidebar();
     }
   },
 
@@ -520,18 +691,18 @@ const App = {
       return this.toast('Lütfen cep telefonu numarasını girin.', 'error');
     }
 
+    const optimistic = this.buildOptimisticContacts([{ name: name || phone, phone }]);
+    this.applyOptimisticContactsToUi(optimistic);
+
     try {
-      const res = await this.api('/api/contacts/sync', 'POST', {
+      const res = await this.syncContactsWithRetry({
         contacts: [{ name, phone }],
         inviteChannel: channel,
         appUrl: location.origin
       });
 
-      if (!res.importedCount || !res.contacts || !res.contacts[0]) {
-        return this.toast('Geçerli bir telefon numarası girin (Örn: 0532 123 45 67).', 'error');
-      }
-
-      const added = res.contacts[0];
+      const added = (res && res.contacts && res.contacts[0]) || optimistic[0];
+      this.saveContactsLocally([added]);
       this.closeModal('contact-modal');
       this.toast(`✅ ${added.display_name} (${added.phone}) rehberinize eklendi!`);
 
@@ -545,13 +716,21 @@ const App = {
       }
 
       // Davet modalını da aç ki kullanıcı isterse hem SMS hem WhatsApp gönderebilsin
-      this.openInviteModal(res);
+      this.openInviteModal(res && res.contacts ? res : { importedCount: 1, contacts: [added], inviteMessage: added.inviteText });
 
       if (added.conversationId) {
         await this.selectConversation(added.conversationId);
+      } else {
+        this.switchNav('contacts');
+        this.renderSidebar();
       }
     } catch (err) {
-      this.toast(err.message, 'error');
+      const added = optimistic[0];
+      this.closeModal('contact-modal');
+      this.switchNav('contacts');
+      this.renderSidebar();
+      this.toast(`✅ ${added.display_name} (${added.phone}) rehberinize eklendi!`);
+      this.openInviteModal({ importedCount: 1, contacts: [added], inviteMessage: added.inviteText });
     }
   },
 
@@ -719,6 +898,7 @@ const App = {
       this.user = data.user;
       this.keyBundle = keyBundle;
       localStorage.setItem('msj_token', this.token);
+      localStorage.setItem('msj_user_profile', JSON.stringify(this.user));
       this.toast(`Hoş geldiniz, ${this.user.display_name}!`);
       this.enterApp();
     } catch (err) {
@@ -750,6 +930,7 @@ const App = {
       this.user = data.user;
       this.keyBundle = keyBundle;
       localStorage.setItem('msj_token', this.token);
+      localStorage.setItem('msj_user_profile', JSON.stringify(this.user));
       if (data.integratedCount > 0) {
         this.toast(`🎉 Hesabınız oluşturuldu ve sizi rehberine ekleyen ${data.integratedCount} kişiyle otomatik entegre edildi!`);
       } else {
@@ -776,6 +957,7 @@ const App = {
     this.conversations = [];
     this.users = [];
     localStorage.removeItem('msj_token');
+    localStorage.removeItem('msj_user_profile');
     document.body.classList.remove('mobile-chat-open');
     this.showAuthScreen();
   },
@@ -982,8 +1164,54 @@ const App = {
   },
 
   async loadUsers() {
-    const data = await this.api('/api/users');
-    this.users = data.users || [];
+    try {
+      const data = await this.api('/api/users');
+      this.users = data.users || [];
+    } catch {
+      this.users = this.users || [];
+    }
+
+    // Yerel hafızada kayıtlı rehber kişilerini birleştir (Render konteyner sıfırlamalarında bile kişiler kaybolmaz)
+    const localContacts = this.getSavedLocalContacts();
+    const unsyncedForServer = [];
+    for (const lc of localContacts) {
+      const lcNorm = lc.phoneNormalized || this.normalizePhoneClient(lc.phone);
+      const found = this.users.some(
+        (u) =>
+          (lcNorm && (this.normalizePhoneClient(u.phone) === lcNorm || u.phone_normalized === lcNorm)) ||
+          u.id === lc.id
+      );
+      if (!found) {
+        this.users.unshift(lc);
+        if (lc.phone || lc.display_name) {
+          unsyncedForServer.push({ name: lc.display_name, phone: lc.phone });
+        }
+      }
+    }
+
+    if (unsyncedForServer.length > 0 && !this._resyncingLocalContacts) {
+      this._resyncingLocalContacts = true;
+      this.api('/api/contacts/sync', 'POST', {
+        contacts: unsyncedForServer,
+        inviteChannel: 'auto',
+        appUrl: location.origin
+      })
+        .then(async (res) => {
+          if (res && res.contacts && res.contacts.length > 0) {
+            this.saveContactsLocally(res.contacts);
+            const fresh = await this.api('/api/users').catch(() => null);
+            if (fresh && fresh.users) {
+              this.users = fresh.users;
+              if (this.currentNav === 'contacts') this.renderSidebar();
+            }
+          }
+        })
+        .catch(() => {})
+        .finally(() => {
+          this._resyncingLocalContacts = false;
+        });
+    }
+
     if (this.currentNav === 'contacts') {
       this.renderSidebar();
     }
@@ -1378,7 +1606,27 @@ const App = {
 
   async startDirectChatWith(peerUserId) {
     try {
-      const data = await this.api('/api/conversations/direct', 'POST', { peerUserId });
+      let targetId = peerUserId;
+      if (String(targetId).startsWith('local_')) {
+        const localUser = this.users.find((u) => u.id === targetId);
+        if (localUser) {
+          const syncRes = await this.syncContactsWithRetry({
+            contacts: [{ name: localUser.display_name, phone: localUser.phone }],
+            inviteChannel: 'auto',
+            appUrl: location.origin
+          });
+          if (syncRes && syncRes.contacts && syncRes.contacts[0]) {
+            targetId = syncRes.contacts[0].id;
+            await Promise.all([this.loadUsers(), this.loadConversations()]);
+            if (syncRes.contacts[0].conversationId) {
+              this.switchNav('chats');
+              await this.selectConversation(syncRes.contacts[0].conversationId);
+              return;
+            }
+          }
+        }
+      }
+      const data = await this.api('/api/conversations/direct', 'POST', { peerUserId: targetId });
       await this.loadConversations();
       this.switchNav('chats');
       await this.selectConversation(data.conversation.id);

@@ -270,9 +270,9 @@ function sendJson(res, status, data) {
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store',
     'X-Content-Type-Options': 'nosniff',
-    'Permissions-Policy': 'contacts=(self), camera=(self), microphone=(self), geolocation=(self)',
+    'Permissions-Policy': 'contacts=(self), camera=(self), microphone=(self), speaker-selection=(self), geolocation=(self)',
     'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-User-Profile',
     'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS'
   });
   res.end(body);
@@ -332,6 +332,102 @@ function sanitizeUsername(rawUsername, displayName, normPhone) {
   return base.slice(0, 24);
 }
 
+const revokedTokens = new Set();
+
+function resolveOrRestoreSession(token, req) {
+  if (!token || revokedTokens.has(token)) return null;
+
+  const querySession = () =>
+    db.prepare(`
+      SELECT s.token, s.user_id, s.device_name, s.device_platform, s.bg_permission,
+             u.id, u.username, u.display_name, u.phone, u.phone_normalized, u.is_registered,
+             u.avatar_color, u.avatar_url,
+             u.bio, u.public_key, u.key_fingerprint,
+             u.privacy_last_seen, u.privacy_read_receipts, u.privacy_hide_notif_content,
+             u.last_seen_at, u.created_at
+      FROM sessions s
+      JOIN users u ON u.id = s.user_id
+      WHERE s.token = ?
+    `).get(token);
+
+  let session = querySession();
+  if (session) {
+    db.prepare('UPDATE sessions SET last_active_at = CURRENT_TIMESTAMP WHERE token = ?').run(token);
+    return session;
+  }
+
+  // Render vb. bulut sunucularda konteyner yeniden başladığında (ephemeral disk)
+  // telefonunda zaten giriş yapmış olan kullanıcının oturumunun kopmaması için otomatik onarım:
+  if (!/^[0-9a-f]{32,128}$/i.test(token)) {
+    return null;
+  }
+
+  try {
+    let profile = null;
+    const rawHeader = (req && req.headers && req.headers['x-user-profile']) || '';
+    if (rawHeader) {
+      try {
+        const jsonStr = Buffer.from(String(rawHeader), 'base64').toString('utf8');
+        profile = JSON.parse(jsonStr);
+      } catch {}
+    }
+
+    const tokenHash = crypto.createHash('sha1').update(token).digest('hex');
+    const rawPhone = String((profile && profile.phone) || '').trim();
+    const normPhone = normalizePhone(rawPhone);
+    const displayPhone = rawPhone ? formatPhoneDisplay(rawPhone) : '';
+    const displayName = String((profile && profile.display_name) || 'Kullanıcı').trim() || 'Kullanıcı';
+    const baseUsername = sanitizeUsername(
+      (profile && profile.username) || '',
+      displayName,
+      normPhone || tokenHash.slice(0, 8)
+    );
+
+    let existingUser = null;
+    if (profile && profile.id) {
+      existingUser = db.prepare('SELECT * FROM users WHERE id = ?').get(String(profile.id));
+    }
+    if (!existingUser && normPhone && normPhone.length >= 7) {
+      existingUser = db.prepare('SELECT * FROM users WHERE phone_normalized = ? LIMIT 1').get(normPhone);
+    }
+    if (!existingUser && baseUsername) {
+      existingUser = db.prepare('SELECT * FROM users WHERE username = ? LIMIT 1').get(baseUsername);
+    }
+
+    let userId = existingUser ? existingUser.id : String((profile && profile.id) || 'usr_' + tokenHash.slice(0, 12));
+
+    if (!existingUser) {
+      let finalUsername = baseUsername;
+      const uClash = db.prepare('SELECT 1 FROM users WHERE username = ?').get(finalUsername);
+      if (uClash) {
+        finalUsername = `${baseUsername.slice(0, 18)}_${tokenHash.slice(0, 4)}`;
+      }
+      const { hash, salt } = hashPassword('123456');
+      const avatarColor = String((profile && profile.avatar_color) || '#10b981');
+      const pubKey = String((profile && profile.public_key) || '');
+      const fp = String((profile && profile.key_fingerprint) || generateFingerprint(pubKey || userId));
+
+      db.prepare(`
+        INSERT OR IGNORE INTO users (id, username, display_name, phone, phone_normalized, is_registered, password_hash, password_salt, avatar_color, public_key, key_fingerprint)
+        VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
+      `).run(userId, finalUsername, displayName, displayPhone, normPhone, hash, salt, avatarColor, pubKey, fp);
+    } else if (existingUser.is_registered === 0) {
+      db.prepare('UPDATE users SET is_registered = 1, display_name = ? WHERE id = ?').run(displayName, userId);
+    }
+
+    const clientIp = (req && req.socket && req.socket.remoteAddress) || 'unknown';
+    db.prepare(`
+      INSERT OR IGNORE INTO sessions (token, user_id, device_name, device_platform, ip_address)
+      VALUES (?, ?, 'Mobil/Web Otomatik Oturum', 'Web', ?)
+    `).run(token, userId, clientIp);
+
+    session = querySession();
+    return session || null;
+  } catch {
+    return null;
+  }
+}
+
 function getAuthUser(req) {
   const authHeader = req.headers['authorization'] || '';
   let token = '';
@@ -344,21 +440,7 @@ function getAuthUser(req) {
   }
   if (!token) return null;
 
-  const session = db.prepare(`
-    SELECT s.token, s.user_id, s.device_name, s.device_platform, s.bg_permission,
-           u.id, u.username, u.display_name, u.phone, u.phone_normalized, u.is_registered,
-           u.avatar_color, u.avatar_url,
-           u.bio, u.public_key, u.key_fingerprint,
-           u.privacy_last_seen, u.privacy_read_receipts, u.privacy_hide_notif_content,
-           u.last_seen_at, u.created_at
-    FROM sessions s
-    JOIN users u ON u.id = s.user_id
-    WHERE s.token = ?
-  `).get(token);
-
-  if (!session) return null;
-  db.prepare('UPDATE sessions SET last_active_at = CURRENT_TIMESTAMP WHERE token = ?').run(token);
-  return session;
+  return resolveOrRestoreSession(token, req);
 }
 
 /**
@@ -937,7 +1019,7 @@ async function handleRequest(req, res) {
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
       'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-User-Profile',
       'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS'
     });
     return res.end();
@@ -1179,6 +1261,7 @@ async function handleRequest(req, res) {
       }
 
       if (pathname === '/api/auth/logout' && req.method === 'POST') {
+        revokedTokens.add(auth.token);
         db.prepare('DELETE FROM sessions WHERE token = ?').run(auth.token);
         backgroundHeartbeats.delete(auth.id);
         return sendJson(res, 200, { ok: true });
@@ -2103,12 +2186,7 @@ function setupWebSocketUpgrade(server) {
     try {
       const parsedUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
       const token = parsedUrl.searchParams.get('token') || '';
-      const session = db.prepare(`
-        SELECT s.user_id, u.display_name
-        FROM sessions s
-        JOIN users u ON u.id = s.user_id
-        WHERE s.token = ?
-      `).get(token);
+      const session = resolveOrRestoreSession(token, req);
 
       if (!session) {
         socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
