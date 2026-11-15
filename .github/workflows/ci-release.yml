@@ -1,0 +1,43 @@
+name: Mesajlasma Derleme, Test ve Yayin (Windows x64 & Mobil PWA)
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: windows-latest
+    steps:
+      - name: Kaynak Kodu İndir
+        uses: actions/checkout@v4
+
+      - name: Node.js 22 LTS Kur
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Windows x64 Yürütülebilir Dosyalarını Derle
+        shell: powershell
+        run: |
+          $csc = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+          & $csc /nologo /platform:x64 /target:winexe /out:MesajlasmaServer.exe /r:System.Windows.Forms.dll,System.Drawing.dll,Microsoft.CSharp.dll src\MesajlasmaServer.cs
+          & $csc /nologo /platform:x64 /target:winexe /out:MesajlasmaSetup.exe /r:System.Windows.Forms.dll,System.Drawing.dll,Microsoft.CSharp.dll src\MesajlasmaSetup.cs
+
+      - name: Entegrasyon Testlerini Çalıştır
+        run: node test-suite.js
+
+      - name: Windows x64 Kurulum Paketini Artifacts Olarak Yayınla
+        uses: actions/upload-artifact@v4
+        with:
+          name: Mesajlasma-Windows-x64-Kurulum-Paketi
+          path: |
+            MesajlasmaSetup.exe
+            MesajlasmaServer.exe
+            Baslat.bat
+            GuvenlikDuvari_IzinVer.bat
+            server.js
+            db.js
+            utils.js
+            package.json
+            public/**

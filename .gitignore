@@ -1,0 +1,7 @@
+node_modules/
+data/*.sqlite*
+uploads/*
+!uploads/.gitkeep
+certs/*.pem
+.env
+Yeni Metin Belgesi.txt

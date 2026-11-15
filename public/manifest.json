@@ -1,0 +1,18 @@
+{
+  "name": "Mesajlaşma - Güvenli İletişim",
+  "short_name": "Mesajlaşma",
+  "description": "WhatsApp, Telegram ve Signal benzeri uçtan uca şifreli çok platformlu mesajlaşma uygulaması",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0b141a",
+  "theme_color": "#059669",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

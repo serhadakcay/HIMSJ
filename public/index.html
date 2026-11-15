@@ -1,0 +1,608 @@
+<!DOCTYPE html>
+<html lang="tr" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#059669" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Mesajlaşma" />
+  <title>Mesajlaşma — Telefon Rehberi, Görüntülü Arama ve Güvenli İletişim</title>
+  <link rel="manifest" href="/manifest.json" />
+  <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+  <link rel="apple-touch-icon" href="/icon.svg" />
+  <link rel="stylesheet" href="/style.css?v=2.4" />
+</head>
+<body>
+  <!-- Bildirim Toast Alanı -->
+  <div id="toast-container" class="toast-container"></div>
+
+  <!-- Gizli VCF / Kişi Kartı Rehber Dosyası Seçici (Android & iOS Tüm Formatlar) -->
+  <input id="vcf-file-input" type="file" accept=".vcf,.vcard,text/vcard,text/x-vcard,text/directory,*/*" multiple class="hidden" onchange="App.handleVcfFileSelected(event)" />
+
+  <!-- ================= 1. GİRİŞ VE KAYIT EKRANI ================= -->
+  <section id="auth-screen" class="auth-screen">
+    <div class="auth-card">
+      <div class="auth-brand">
+        <img src="/icon.svg" alt="Logo" class="auth-logo" />
+        <div>
+          <h1>Mesajlaşma</h1>
+          <p>Telefon Rehberi • SMS/WhatsApp Davet • Görüntülü/Sesli Arama</p>
+        </div>
+      </div>
+
+      <div class="auth-tabs">
+        <button id="tab-login-btn" class="auth-tab active" onclick="App.switchAuthTab('login')">Giriş Yap</button>
+        <button id="tab-register-btn" class="auth-tab" onclick="App.switchAuthTab('register')">Yeni Hesap Oluştur</button>
+      </div>
+
+      <!-- Giriş Formu -->
+      <form id="login-form" class="auth-form" onsubmit="App.handleLogin(event)">
+        <label class="field-label">Cep Telefonu Numaranız veya Kullanıcı Adı</label>
+        <input id="login-username" type="text" class="input" placeholder="Örn: 0532 123 45 67 veya kullanici_adi" required autocomplete="username" />
+
+        <label class="field-label">Parola</label>
+        <input id="login-password" type="password" class="input" placeholder="••••••" required autocomplete="current-password" />
+
+        <button type="submit" class="btn btn-primary btn-block">🔒 Güvenli Giriş Yap</button>
+      </form>
+
+      <!-- Kayıt Formu -->
+      <form id="register-form" class="auth-form hidden" onsubmit="App.handleRegister(event)">
+        <label class="field-label">Ad Soyad</label>
+        <input id="reg-displayname" type="text" class="input" placeholder="Örn: Ali Veli" required />
+
+        <label class="field-label">Cep Telefonu Numaranız (Rehber Entegrasyonu İçin)</label>
+        <input id="reg-phone" type="tel" class="input" placeholder="Örn: 0532 123 45 67" required />
+
+        <label class="field-label">Kullanıcı Adı (İsteğe Bağlı)</label>
+        <input id="reg-username" type="text" class="input" placeholder="Boş bırakırsanız otomatik oluşturulur" autocomplete="username" />
+
+        <label class="field-label">Parola</label>
+        <input id="reg-password" type="password" class="input" placeholder="En az 4 karakter" required autocomplete="new-password" />
+
+        <button type="submit" class="btn btn-primary btn-block">✨ Numaramla Kaydol ve Başla</button>
+      </form>
+
+      <div class="quick-demo-box">
+        <div class="quick-demo-title" style="text-align:center;">
+          📱 Telefon numaranızla kaydolduğunuzda, sizi rehberine eklemiş olan kişilerle hesabınız otomatik olarak eşleştirilir.
+        </div>
+        <div class="auth-footer-actions">
+          <button type="button" class="btn btn-secondary btn-sm" onclick="App.openInstallModal()">
+            📥 Telefona &amp; Bilgisayara Kur
+          </button>
+          <button type="button" class="btn btn-secondary btn-sm" onclick="App.openQrModal()">
+            📱 QR Kod ile Bağlan
+          </button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= 2. ANA UYGULAMA EKRANI ================= -->
+  <main id="app-screen" class="app-layout hidden">
+    <!-- Sol İkon Navigasyon Rayı (Masaüstünde Sol, Mobilde Alt Bar) -->
+    <nav class="nav-rail">
+      <div class="nav-rail-top">
+        <button class="nav-item active" data-nav="chats" onclick="App.switchNav('chats')" title="Sohbetler">
+          <span class="nav-icon">💬</span>
+          <span class="nav-label">Sohbetler</span>
+        </button>
+        <button class="nav-item" data-nav="contacts" onclick="App.switchNav('contacts')" title="Telefon Rehberi ve Kişiler">
+          <span class="nav-icon">📒</span>
+          <span class="nav-label">Rehber</span>
+        </button>
+        <button class="nav-item" data-nav="calls" onclick="App.switchNav('calls')" title="Sesli ve Görüntülü Aramalar">
+          <span class="nav-icon">📞</span>
+          <span class="nav-label">Aramalar</span>
+        </button>
+        <button class="nav-item" data-nav="stories" onclick="App.switchNav('stories')" title="Durum / Hikâyeler">
+          <span class="nav-icon">⭕</span>
+          <span class="nav-label">Durum</span>
+        </button>
+        <button class="nav-item" data-nav="channels" onclick="App.switchNav('channels')" title="Duyuru Kanalları">
+          <span class="nav-icon">📢</span>
+          <span class="nav-label">Kanallar</span>
+        </button>
+      </div>
+      <div class="nav-rail-bottom">
+        <button class="nav-item" onclick="App.openInstallModal()" title="Telefona ve Bilgisayara İndir / Kur">
+          <span class="nav-icon">📥</span>
+          <span class="nav-label">Yükle</span>
+        </button>
+        <button class="nav-item" data-nav="settings" onclick="App.switchNav('settings')" title="Ayarlar ve Arka Plan İzinleri">
+          <span class="nav-icon">⚙️</span>
+          <span class="nav-label">Ayarlar</span>
+        </button>
+      </div>
+    </nav>
+
+    <!-- Sol Liste Sütunu -->
+    <aside id="sidebar-panel" class="sidebar-panel">
+      <!-- Üst Kullanıcı ve Aksiyon Başlığı -->
+      <header class="sidebar-header">
+        <div class="my-profile-summary" onclick="App.switchNav('settings')">
+          <div id="my-avatar" class="avatar">
+            K
+            <span class="status-dot online"></span>
+          </div>
+          <div class="my-profile-text">
+            <div id="my-display-name" class="my-name">Kullanıcı</div>
+            <div id="my-connection-badge" class="conn-badge">🟢 Aktif • Arka Plan Hazır</div>
+          </div>
+        </div>
+        <div class="sidebar-actions">
+          <button class="icon-btn" onclick="App.openContactModal()" title="Rehberden Kişi Ekle / Numara Kaydet">📒+</button>
+          <button class="icon-btn" onclick="App.openCreateGroupModal('group')" title="Yeni Grup Oluştur">👥+</button>
+          <button class="icon-btn" onclick="App.openInstallModal()" title="Telefona &amp; Bilgisayara Kur">📥</button>
+          <button class="icon-btn" onclick="App.toggleTheme()" title="Tema Değiştir">🌓</button>
+        </div>
+      </header>
+
+      <!-- Arka Planda Çalışma ve Bildirim İzni Bandı -->
+      <div id="bg-permission-banner" class="bg-perm-banner">
+        <span>🔔 <strong>Arka Plan Modu:</strong> Kapalıyken mesaj/arama bildirimi almak için izin verin.</span>
+        <button class="btn btn-primary btn-sm" onclick="App.requestAllBackgroundPermissions()">İzin Ver</button>
+      </div>
+
+      <!-- Arama Kutusu -->
+      <div class="sidebar-search">
+        <input id="global-search-input" type="search" class="input search-input" placeholder="İsim veya telefon numarası ara (05XX...)" oninput="App.onSidebarSearch(this.value)" />
+      </div>
+
+      <!-- Sohbet Filtre Sekmeleri -->
+      <div id="chat-filter-bar" class="filter-chips">
+        <button class="filter-chip active" data-filter="all" onclick="App.setChatFilter('all')">Tümü</button>
+        <button class="filter-chip" data-filter="online" onclick="App.setChatFilter('online')">🟢 Aktif Olanlar</button>
+        <button class="filter-chip" data-filter="unread" onclick="App.setChatFilter('unread')">Okunmamış</button>
+        <button class="filter-chip" data-filter="group" onclick="App.setChatFilter('group')">Gruplar</button>
+      </div>
+
+      <!-- Dinamik Sol Panel İçeriği -->
+      <div id="sidebar-list-container" class="sidebar-list"></div>
+    </aside>
+
+    <!-- Orta / Sağ Sohbet Alanı -->
+    <section id="chat-area" class="chat-area">
+      <!-- Sohbet Seçilmediğinde Gösterilen Karşılama Ekranı -->
+      <div id="empty-chat-state" class="empty-chat-state">
+        <div class="empty-chat-box">
+          <img src="/icon.svg" alt="Mesajlaşma" class="empty-logo" />
+          <h2>Telefon Rehberi, SMS/WhatsApp Davet ve Görüntülü Arama</h2>
+          <p>
+            Cep telefonunuzun rehberinden kişi ekleyin; eklenen kişilere otomatik <strong>SMS veya WhatsApp</strong> davet mesajı gönderin. Kaydedilen kişiler programı kullandığında numaralarıyla otomatik entegre edilir.
+          </p>
+          <div class="empty-quick-actions">
+            <button class="btn btn-primary" onclick="App.openContactModal()">📒 Rehberden Kişi Ekle / Numara Kaydet</button>
+            <button class="btn btn-secondary" onclick="App.switchNav('contacts')">📱 Kayıtlı Kişileri Gör</button>
+            <button class="btn btn-secondary" onclick="App.requestAllBackgroundPermissions()">🔔 Arka Planda Çalışma İzni Ver</button>
+            <button class="btn btn-secondary" onclick="App.openInstallModal()">📥 Telefona / Bilgisayara Kur</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Aktif Sohbet Görünümü -->
+      <div id="active-chat-view" class="active-chat-view hidden">
+        <!-- Sohbet Üst Başlığı -->
+        <header class="chat-header">
+          <div class="chat-header-left">
+            <button class="icon-btn mobile-back-btn" onclick="App.closeMobileChat()" title="Geri">⬅️</button>
+            <div id="chat-header-avatar" class="avatar" onclick="App.toggleChatInfoDrawer()">K</div>
+            <div class="chat-header-info" onclick="App.toggleChatInfoDrawer()">
+              <div class="chat-title-row">
+                <span id="chat-header-title" class="chat-title">Sohbet Adı</span>
+                <span id="chat-e2ee-badge" class="e2ee-pill" onclick="event.stopPropagation(); App.openSafetyModal()" title="Uçtan Uca Şifreleme Doğrulaması">🔒 E2EE</span>
+              </div>
+              <div id="chat-header-subtitle" class="chat-subtitle">🟢 Aktif</div>
+            </div>
+          </div>
+
+          <div class="chat-header-actions">
+            <button id="chat-btn-wa-invite" class="btn btn-secondary btn-sm hidden" onclick="App.sendActivePeerInvite('whatsapp')" title="WhatsApp'tan Davet Gönder">🟢 WhatsApp</button>
+            <button id="chat-btn-sms-invite" class="btn btn-secondary btn-sm hidden" onclick="App.sendActivePeerInvite('sms')" title="SMS ile Davet Gönder">📩 SMS</button>
+            <button class="btn btn-secondary btn-sm" onclick="App.startCall('audio')" title="Görüntüsüz (Sesli) Ara">📞 Sesli Ara</button>
+            <button class="btn btn-primary btn-sm" onclick="App.startCall('video')" title="Görüntülü Ara">📹 Görüntülü Ara</button>
+            <button class="icon-btn" onclick="App.toggleInChatSearch()" title="Sohbet İçinde Ara">🔍</button>
+            <button class="icon-btn" onclick="App.toggleChatInfoDrawer()" title="Kişi / Grup Bilgisi">ℹ️</button>
+          </div>
+        </header>
+
+        <!-- Sohbet İçi Mesaj Arama Çubuğu -->
+        <div id="in-chat-search-bar" class="in-chat-search-bar hidden">
+          <input id="in-chat-search-input" type="search" class="input" placeholder="Bu sohbetteki mesajlarda ara..." oninput="App.renderMessages()" />
+          <button class="btn btn-ghost btn-sm" onclick="App.toggleInChatSearch()">Kapat</button>
+        </div>
+
+        <!-- Sabitlenmiş Mesaj Bandı -->
+        <div id="pinned-message-banner" class="pinned-banner hidden" onclick="App.scrollToPinnedMessage()">
+          <span>📌 <strong>Sabitlenen Mesaj:</strong> <span id="pinned-message-text"></span></span>
+        </div>
+
+        <!-- Mesaj Akışı -->
+        <div id="messages-container" class="messages-container"></div>
+
+        <!-- Yanıtla / Düzenle Önizleme Çubuğu -->
+        <div id="compose-context-bar" class="compose-context-bar hidden">
+          <div class="compose-context-info">
+            <strong id="compose-context-title">Yanıtlanıyor</strong>
+            <div id="compose-context-text" class="compose-context-sub"></div>
+          </div>
+          <button class="icon-btn" onclick="App.clearComposeContext()">✕</button>
+        </div>
+
+        <!-- Alt Mesaj Yazma ve Gönderme Alanı -->
+        <footer id="chat-composer" class="chat-composer">
+          <input id="file-upload-input" type="file" class="hidden" onchange="App.handleFileSelected(event)" />
+
+          <button class="icon-btn" onclick="App.toggleEmojiPicker()" title="İfade Ekle">😊</button>
+          <button class="icon-btn" onclick="document.getElementById('file-upload-input').click()" title="Fotoğraf, Video veya Dosya Gönder">📎</button>
+          <button class="icon-btn" onclick="App.openPollModal()" title="Anket Oluştur">📊</button>
+
+          <input
+            id="message-input"
+            type="text"
+            class="input message-input"
+            placeholder="Mesaj yazın..."
+            autocomplete="off"
+            oninput="App.handleTypingInput()"
+            onkeydown="if(event.key==='Enter'){event.preventDefault();App.sendMessage();}"
+          />
+
+          <div id="voice-record-bar" class="voice-record-bar hidden">
+            <span class="rec-dot"></span>
+            <span id="voice-record-timer">00:00</span>
+            <button type="button" class="btn btn-danger btn-sm" onclick="App.cancelVoiceRecording()">İptal</button>
+            <button type="button" class="btn btn-primary btn-sm" onclick="App.finishVoiceRecording()">Gönder</button>
+          </div>
+
+          <button id="btn-voice-rec" class="icon-btn" onclick="App.startVoiceRecording()" title="Sesli Mesaj Kaydet">🎤</button>
+          <button id="btn-send-msg" class="btn btn-primary send-btn" onclick="App.sendMessage()" title="Gönder">➤</button>
+        </footer>
+
+        <!-- Hızlı Emoji Seçici Kutusu -->
+        <div id="emoji-picker" class="emoji-picker hidden">
+          <span onclick="App.insertEmoji('😊')">😊</span>
+          <span onclick="App.insertEmoji('😂')">😂</span>
+          <span onclick="App.insertEmoji('❤️')">❤️</span>
+          <span onclick="App.insertEmoji('👍')">👍</span>
+          <span onclick="App.insertEmoji('🔥')">🔥</span>
+          <span onclick="App.insertEmoji('🎉')">🎉</span>
+          <span onclick="App.insertEmoji('👏')">👏</span>
+          <span onclick="App.insertEmoji('🙏')">🙏</span>
+          <span onclick="App.insertEmoji('🚀')">🚀</span>
+          <span onclick="App.insertEmoji('🔒')">🔒</span>
+          <span onclick="App.insertEmoji('✅')">✅</span>
+          <span onclick="App.insertEmoji('😎')">😎</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Sağ Sohbet / Grup Bilgisi Çekmecesi -->
+    <aside id="chat-info-drawer" class="chat-info-drawer hidden">
+      <header class="drawer-header">
+        <h3>Kişi ve Sohbet Bilgisi</h3>
+        <button class="icon-btn" onclick="App.toggleChatInfoDrawer()">✕</button>
+      </header>
+      <div id="chat-info-content" class="drawer-body"></div>
+    </aside>
+  </main>
+
+  <!-- ================= 3. MODALLAR VE ARAMA EKRANI ================= -->
+
+  <!-- Telefon Rehberi Kaydetme, İzin Verme & SMS/WhatsApp Gönderme Modalı -->
+  <div id="contact-modal" class="modal-backdrop hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3>📒 Cep Telefonu Rehberinden Kişi Ekle &amp; Davet Gönder</h3>
+        <button class="icon-btn" onclick="App.closeModal('contact-modal')">✕</button>
+      </div>
+      <div class="modal-body">
+        <!-- HTTPS Rehber İzni Uyarısı (Yalnızca HTTP üzerinden bağlanıldığında görünür) -->
+        <div id="https-contacts-hint" class="hidden" style="background:rgba(245, 158, 11, 0.15);border:1px solid rgba(245, 158, 11, 0.45);padding:10px 12px;border-radius:10px;font-size:12px;">
+          ⚠️ <strong>Doğrudan Rehber Erişimi:</strong> Telefon tarayıcıları doğrudan rehber seçimi için güvenli bağlantı (HTTPS) veya rehber dosyası/metni kullanır.
+          <button type="button" class="btn btn-primary btn-sm" style="margin-top:6px;width:100%;" onclick="App.switchToHttpsForContacts()">
+            🔒 Doğrudan Rehber İzni İçin Güvenli Bağlantıya (HTTPS) Geç
+          </button>
+        </div>
+
+        <!-- 1. Cep Telefonu Rehberinden Doğrudan Aktarma Butonları -->
+        <div style="background:var(--bg-header);padding:12px;border-radius:12px;">
+          <h4 style="margin-bottom:6px;color:var(--primary);">📱 1. Cep Telefonu Rehberinden Kişi Seç</h4>
+          <p style="font-size:12px;color:var(--text-muted);margin-bottom:10px;">
+            Telefon rehberinizden bir veya birden fazla kişi seçin ya da rehberden paylaşılan kişi kartını (`.vcf`) yükleyin:
+          </p>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+            <button type="button" class="btn btn-primary btn-sm" onclick="App.importFromPhoneContactsApi()">
+              📱 Rehberden Kişi Seç
+            </button>
+            <label for="vcf-file-input" class="btn btn-secondary btn-sm" style="cursor:pointer;display:inline-flex;align-items:center;justify-content:center;margin:0;">
+              📂 Rehber / Kişi Kartı (.vcf) Seç
+            </label>
+          </div>
+        </div>
+
+        <!-- 2. Manuel Numara / Kişi Ekleme ve Anında SMS / WhatsApp Mesajı Gönderme -->
+        <form onsubmit="App.submitAddContact(event, 'auto')" style="background:var(--bg-header);padding:12px;border-radius:12px;display:flex;flex-direction:column;gap:8px;">
+          <h4 style="color:#38bdf8;">➕ 2. Numara ile Kişi Ekle &amp; SMS / WhatsApp Gönder</h4>
+          <label class="field-label">Kişi Adı Soyadı (İsteğe Bağlı)</label>
+          <input id="contact-name-input" type="text" class="input" placeholder="Örn: Mustafa Kaya (Boş bırakılırsa numara yazılır)" />
+
+          <label class="field-label">Cep Telefonu Numarası</label>
+          <input id="contact-phone-input" type="tel" class="input" placeholder="Örn: 0532 444 55 66" required />
+
+          <div style="font-size:11.5px;color:var(--text-muted);background:var(--bg-app);padding:8px 10px;border-radius:8px;">
+            📩 <strong>Gönderilecek Mesaj:</strong><br />
+            <em>"(............ Bu numaraları kullanıcı sizi programı kullanmak için ekledi)"</em>
+          </div>
+
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:4px;">
+            <button type="button" class="btn btn-primary btn-sm" style="background:#16a34a;" onclick="App.submitAddContact(event, 'whatsapp')">
+              🟢 Kaydet &amp; WhatsApp'tan At
+            </button>
+            <button type="button" class="btn btn-secondary btn-sm" style="border-color:#38bdf8;color:#38bdf8;" onclick="App.submitAddContact(event, 'sms')">
+              📩 Kaydet &amp; SMS Gönder
+            </button>
+          </div>
+          <button type="submit" class="btn btn-primary btn-block btn-sm">
+            💾 Rehbere Kaydet ve Davet Seçeneklerini Aç
+          </button>
+        </form>
+
+        <!-- 3. Toplu Kişi / Numara Yapıştırarak Ekleme (iPhone & Tüm Cihazlar İçin) -->
+        <div style="background:var(--bg-header);padding:12px;border-radius:12px;display:flex;flex-direction:column;gap:8px;">
+          <h4 style="font-size:13.5px;">📋 3. Rehberden Kopyalanan Kişileri / Numaraları Yapıştır</h4>
+          <textarea id="bulk-contacts-input" class="input" rows="2" placeholder="Her satıra bir kişi veya numara yazın/yapıştırın:&#10;Ali Yılmaz 0532 111 22 33&#10;0544 222 33 44"></textarea>
+          <button type="button" class="btn btn-secondary btn-sm" onclick="App.submitBulkTextContacts()">
+            📥 Yapıştırılan Kişileri Rehbere Ekle &amp; SMS/WhatsApp Gönder
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Eklenen Kişilere SMS veya WhatsApp Mesajı Gönderme Modalı -->
+  <div id="invite-modal" class="modal-backdrop hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3>📲 Eklenen Kişilere SMS veya WhatsApp Mesajı Gönder</h3>
+        <button class="icon-btn" onclick="App.closeModal('invite-modal')">✕</button>
+      </div>
+      <div class="modal-body">
+        <p style="font-size:13px;color:var(--text-muted);">
+          Rehberinize eklenen kişilere aşağıdaki bilgilendirme mesajını <strong>WhatsApp</strong> veya <strong>SMS</strong> üzerinden hemen gönderebilirsiniz:
+        </p>
+
+        <label class="field-label">Gönderilecek Mesaj Metni</label>
+        <textarea id="invite-message-textarea" class="input" rows="3" oninput="App.refreshInviteModalLinks()"></textarea>
+
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <a id="invite-bulk-sms-btn" href="#" class="btn btn-primary btn-sm" style="flex:1;">
+            📩 Tümüne SMS Gönder
+          </a>
+          <button type="button" class="btn btn-secondary btn-sm" onclick="App.copyInviteMessage()">
+            📋 Mesajı Kopyala
+          </button>
+        </div>
+
+        <label class="field-label">Eklenen Kişiler (Tek Tıkla WhatsApp veya SMS Gönderin)</label>
+        <div id="invite-contacts-list" style="display:flex;flex-direction:column;gap:8px;max-height:240px;overflow-y:auto;"></div>
+
+        <div class="modal-footer">
+          <button type="button" class="btn btn-primary" onclick="App.closeModal('invite-modal')">Tamam</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- İnternet Üzerinden Telefona & Bilgisayara Kurulum Modalı -->
+  <div id="install-modal" class="modal-backdrop hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3>📥 Cep Telefonuna ve Bilgisayara Kurulum</h3>
+        <button class="icon-btn" onclick="App.closeModal('install-modal')">✕</button>
+      </div>
+      <div class="modal-body">
+        <!-- 1. Cep Telefonuna Kurulum -->
+        <div style="background:var(--bg-header);padding:14px;border-radius:12px;">
+          <h4 style="margin-bottom:6px;color:var(--primary);">📱 1. Cep Telefonuna (Android &amp; iPhone) Kur</h4>
+          <p style="font-size:12.5px;color:var(--text-muted);margin-bottom:10px;">
+            Uygulamayı telefonunuza kurduğunuzda ana ekranınıza simge olarak yerleşir ve arka planda bildirim alır.
+          </p>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <button type="button" class="btn btn-primary btn-sm" onclick="App.triggerPwaInstall()">
+              📲 Telefonuma Şimdi Yükle (PWA)
+            </button>
+            <button type="button" class="btn btn-secondary btn-sm" onclick="App.closeModal('install-modal'); App.openQrModal();">
+              📷 Telefon Kamerasıyla QR Okut
+            </button>
+          </div>
+        </div>
+
+        <!-- 2. Windows Bilgisayara Kurulum -->
+        <div style="background:var(--bg-header);padding:14px;border-radius:12px;">
+          <h4 style="margin-bottom:6px;color:#38bdf8;">💻 2. Windows 10/11 (x64) Bilgisayara Kur</h4>
+          <p style="font-size:12.5px;color:var(--text-muted);margin-bottom:10px;">
+            Kurulum sihirbazı masaüstü kısayolu oluşturur ve program kapatılsa bile Windows arka planında (Sistem Tepsisi) çalışmasını sağlar.
+          </p>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <a href="/download/MesajlasmaSetup.exe" download="MesajlasmaSetup.exe" class="btn btn-primary btn-sm">
+              ⬇️ Windows Kurulum Sihirbazını İndir (MesajlasmaSetup.exe)
+            </a>
+            <button type="button" class="btn btn-secondary btn-sm" onclick="App.triggerPwaInstall()">
+              🖥️ Masaüstü Uygulaması Olarak Kur
+            </button>
+          </div>
+        </div>
+
+        <!-- 3. Arka Planda Çalışma İzinleri -->
+        <div style="background:var(--bg-header);padding:14px;border-radius:12px;">
+          <h4 style="margin-bottom:6px;color:#22c55e;">🔔 3. Program Kapatılsa Bile Arka Planda Çalışma İzni</h4>
+          <p style="font-size:12.5px;color:var(--text-muted);margin-bottom:10px;">
+            Uygulama kapatıldığında bile yeni mesajları ve gelen sesli/görüntülü aramaları kaçırmamak için arka plan iznini aktif edin:
+          </p>
+          <button type="button" class="btn btn-primary btn-sm" onclick="App.requestAllBackgroundPermissions()">
+            ✅ Arka Plan, Bildirim, Kamera ve Mikrofon İznini Etkinleştir
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- QR Kod & Telefon Bağlantı Modalı -->
+  <div id="qr-modal" class="modal-backdrop hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3>📱 Cep Telefonundan Bağlan (QR Kod)</h3>
+        <button class="icon-btn" onclick="App.closeModal('qr-modal')">✕</button>
+      </div>
+      <div class="modal-body qr-modal-body">
+        <p class="text-muted" style="font-size:13px;">Telefon kameranızla aşağıdaki QR kodu okutarak doğrudan bağlanabilir ve telefonunuza kurabilirsiniz:</p>
+        <div id="qr-svg-box" class="qr-svg-box">Yükleniyor...</div>
+        <div class="qr-urls-box">
+          <div class="qr-url-row">
+            <span>🌐 Standart Bağlantı:</span>
+            <code id="qr-http-url">http://localhost:3080</code>
+            <button class="btn btn-secondary btn-sm" onclick="App.SwitchQrMode('http')">QR Göster</button>
+          </div>
+          <div class="qr-url-row">
+            <span>🔒 Güvenli HTTPS (Rehber &amp; Kamera İçin):</span>
+            <code id="qr-https-url">https://localhost:3443</code>
+            <button class="btn btn-secondary btn-sm" onclick="App.SwitchQrMode('https')">QR Göster</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Yeni Grup veya Kanal Oluşturma Modalı -->
+  <div id="group-modal" class="modal-backdrop hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3 id="group-modal-title">👥 Yeni Grup Oluştur</h3>
+        <button class="icon-btn" onclick="App.closeModal('group-modal')">✕</button>
+      </div>
+      <form class="modal-body" onsubmit="App.submitCreateGroup(event)">
+        <input id="group-type-input" type="hidden" value="group" />
+        <label class="field-label">Grup / Kanal Adı</label>
+        <input id="group-title-input" type="text" class="input" placeholder="Örn: Aile Grubu veya Proje Duyuruları" required />
+
+        <label class="field-label">Açıklama</label>
+        <input id="group-desc-input" type="text" class="input" placeholder="Kısa açıklama..." />
+
+        <label class="field-label">Rehberden Kişileri Seçin</label>
+        <div id="group-members-checklist" class="checklist-box"></div>
+
+        <div class="modal-footer">
+          <button type="button" class="btn btn-ghost" onclick="App.closeModal('group-modal')">İptal</button>
+          <button type="submit" class="btn btn-primary">Oluştur</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Anket Oluşturma Modalı -->
+  <div id="poll-modal" class="modal-backdrop hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3>📊 Yeni Anket Oluştur</h3>
+        <button class="icon-btn" onclick="App.closeModal('poll-modal')">✕</button>
+      </div>
+      <form class="modal-body" onsubmit="App.submitCreatePoll(event)">
+        <label class="field-label">Anket Sorusu</label>
+        <input id="poll-question-input" type="text" class="input" placeholder="Örn: Toplantıyı saat kaçta yapalım?" required />
+
+        <label class="field-label">Seçenekler (Her satıra bir seçenek)</label>
+        <textarea id="poll-options-input" type="text" class="input" rows="4" placeholder="14:00&#10;15:30&#10;Yarın Sabah" required></textarea>
+
+        <div class="modal-footer">
+          <button type="button" class="btn btn-ghost" onclick="App.closeModal('poll-modal')">İptal</button>
+          <button type="submit" class="btn btn-primary">Anketi Gönder</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- E2EE Güvenlik Kodu / Anahtar Doğrulama Modalı -->
+  <div id="safety-modal" class="modal-backdrop hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3>🔒 Uçtan Uca Şifreleme (E2EE) Güvenlik Doğrulaması</h3>
+        <button class="icon-btn" onclick="App.closeModal('safety-modal')">✕</button>
+      </div>
+      <div id="safety-modal-body" class="modal-body"></div>
+    </div>
+  </div>
+
+  <!-- Mesaj İletme (Forward) Modalı -->
+  <div id="forward-modal" class="modal-backdrop hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3>↪️ Mesajı İlet</h3>
+        <button class="icon-btn" onclick="App.closeModal('forward-modal')">✕</button>
+      </div>
+      <div id="forward-modal-list" class="modal-body"></div>
+    </div>
+  </div>
+
+  <!-- Hikâye / Durum Paylaşma Modalı -->
+  <div id="story-modal" class="modal-backdrop hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3>⭕ Yeni Durum / Hikâye Paylaş (24 Saat)</h3>
+        <button class="icon-btn" onclick="App.closeModal('story-modal')">✕</button>
+      </div>
+      <form class="modal-body" onsubmit="App.submitCreateStory(event)">
+        <label class="field-label">Durum Metni</label>
+        <textarea id="story-text-input" class="input" rows="3" placeholder="Bugün neler yapıyorsunuz?" required></textarea>
+
+        <label class="field-label">Arka Plan Rengi</label>
+        <input id="story-color-input" type="color" class="input-color" value="#059669" />
+
+        <div class="modal-footer">
+          <button type="button" class="btn btn-ghost" onclick="App.closeModal('story-modal')">İptal</button>
+          <button type="submit" class="btn btn-primary">Paylaş</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- WebRTC Sesli ve Görüntülü Arama Tam Ekran Katmanı -->
+  <div id="call-overlay" class="call-overlay hidden">
+    <div class="call-container">
+      <div class="call-header">
+        <span class="e2ee-pill">🔒 Uçtan Uca Şifreli WebRTC Arama</span>
+        <span id="call-timer-text">00:00</span>
+      </div>
+
+      <div class="call-video-stage">
+        <video id="remote-video" autoplay playsinline class="remote-video"></video>
+        <video id="local-video" autoplay playsinline muted class="local-video"></video>
+
+        <div id="call-avatar-placeholder" class="call-avatar-placeholder">
+          <div id="call-peer-avatar" class="avatar avatar-xl">K</div>
+          <h2 id="call-peer-name">Kişi Adı</h2>
+          <p id="call-status-label">Aranıyor...</p>
+        </div>
+      </div>
+
+      <!-- Gelen Arama Cevapla / Reddet Butonları -->
+      <div id="incoming-call-controls" class="call-controls hidden">
+        <button class="call-btn call-btn-accept" onclick="App.acceptIncomingCall()">📞 Cevapla</button>
+        <button class="call-btn call-btn-end" onclick="App.rejectIncomingCall()">✕ Reddet</button>
+      </div>
+
+      <!-- Aktif Arama Kontrolleri -->
+      <div id="active-call-controls" class="call-controls">
+        <button id="btn-toggle-mic" class="call-btn" onclick="App.toggleCallMic()">🎤 Mikrofon</button>
+        <button id="btn-toggle-cam" class="call-btn" onclick="App.toggleCallCamera()">📷 Kamera</button>
+        <button class="call-btn" onclick="App.shareScreenInCall()">🖥️ Ekran Paylaş</button>
+        <button class="call-btn call-btn-end" onclick="App.endCall(true)">📞 Kapat</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/crypto-e2ee.js?v=2.4"></script>
+  <script src="/app.js?v=2.4"></script>
+</body>
+</html>
