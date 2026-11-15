@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- BUILD_VER: 400 -->
+<!-- BUILD_VER: 500 -->
 <html lang="tr" data-theme="dark">
 <head>
   <meta charset="UTF-8" />
@@ -12,7 +12,7 @@
   <link rel="manifest" href="/manifest.json" />
   <link rel="icon" type="image/svg+xml" href="/icon.svg" />
   <link rel="apple-touch-icon" href="/icon.svg" />
-  <link rel="stylesheet" href="/style.css?v=4.0" />
+  <link rel="stylesheet" href="/style.css?v=5.0" />
 </head>
 <body>
   <!-- Bildirim Toast Alanı -->
@@ -136,6 +136,7 @@
         <div class="sidebar-actions">
           <button class="icon-btn" onclick="App.openContactModal()" title="Rehberden Kişi Ekle / Numara Kaydet">📒+</button>
           <button class="icon-btn" onclick="App.openCreateGroupModal('group')" title="Yeni Grup Oluştur">👥+</button>
+          <button class="icon-btn" onclick="App.openTypographyModal()" title="Yazı Boyutu ve Stili Ayarla" style="font-size:13.5px;font-weight:800;">Aa</button>
           <button class="icon-btn" onclick="App.openInstallModal()" title="Telefona &amp; Bilgisayara Kur">📥</button>
           <button class="icon-btn" onclick="App.toggleTheme()" title="Tema Değiştir">🌓</button>
         </div>
@@ -200,10 +201,11 @@
           </div>
 
           <div class="chat-header-actions">
-            <button id="chat-btn-wa-invite" class="btn btn-secondary btn-sm hidden" onclick="App.sendActivePeerInvite('whatsapp')" title="WhatsApp'tan Davet Gönder">🟢 WhatsApp</button>
-            <button id="chat-btn-sms-invite" class="btn btn-secondary btn-sm hidden" onclick="App.sendActivePeerInvite('sms')" title="SMS ile Davet Gönder">📩 SMS</button>
-            <button class="btn btn-secondary btn-sm" onclick="App.startCall('audio')" title="Görüntüsüz (Sesli) Ara">📞 Sesli Ara</button>
-            <button class="btn btn-primary btn-sm" onclick="App.startCall('video')" title="Görüntülü Ara">📹 Görüntülü Ara</button>
+            <button id="chat-btn-wa-invite" class="btn btn-secondary btn-sm hidden" onclick="App.sendActivePeerInvite('whatsapp')" title="WhatsApp'tan Davet Gönder">🟢<span class="btn-label-desktop"> WhatsApp</span></button>
+            <button id="chat-btn-sms-invite" class="btn btn-secondary btn-sm hidden" onclick="App.sendActivePeerInvite('sms')" title="SMS ile Davet Gönder">📩<span class="btn-label-desktop"> SMS</span></button>
+            <button class="btn btn-secondary btn-sm" onclick="App.startCall('audio')" title="Görüntüsüz (Sesli) Ara">📞<span class="btn-label-desktop"> Sesli Ara</span></button>
+            <button class="btn btn-primary btn-sm" onclick="App.startCall('video')" title="Görüntülü Ara">📹<span class="btn-label-desktop"> Görüntülü Ara</span></button>
+            <button class="icon-btn" onclick="App.openTypographyModal()" title="Yazı Boyutu ve Stili Ayarla" style="font-size:13px;font-weight:800;">Aa</button>
             <button class="icon-btn" onclick="App.toggleInChatSearch()" title="Sohbet İçinde Ara">🔍</button>
             <button class="icon-btn" onclick="App.toggleChatInfoDrawer()" title="Kişi / Grup Bilgisi">ℹ️</button>
           </div>
@@ -568,6 +570,69 @@
     </div>
   </div>
 
+  <!-- Yazı Boyutu, Yazı Stili ve Ekran Görünümü Özelleştirme Modalı -->
+  <div id="typography-modal" class="modal-backdrop hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3>🔤 Yazı Boyutu, Stili ve Ekran Görünümü</h3>
+        <button class="icon-btn" onclick="App.closeModal('typography-modal')">✕</button>
+      </div>
+      <div class="modal-body">
+        <div style="background:var(--bg-header);padding:12px;border-radius:10px;border:1px solid var(--border-color);">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+            <strong style="font-size:13px;">📏 1. Yazı Boyutu Seçin</strong>
+            <span id="font-size-value-badge" style="color:var(--primary);font-weight:700;font-size:13px;">14px (Normal)</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
+            <button type="button" class="btn btn-secondary btn-sm" onclick="App.stepFontSize(-1)">➖ A-</button>
+            <input id="font-size-slider" type="range" min="11" max="22" step="1" value="14" style="flex:1;accent-color:var(--primary);" oninput="App.setFontSize(this.value)" />
+            <button type="button" class="btn btn-secondary btn-sm" onclick="App.stepFontSize(1)">➕ A+</button>
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(82px,1fr));gap:6px;">
+            <button type="button" class="btn btn-secondary btn-sm font-size-preset" data-size="12" onclick="App.setFontSize(12)">Küçük (12)</button>
+            <button type="button" class="btn btn-secondary btn-sm font-size-preset" data-size="14" onclick="App.setFontSize(14)">Normal (14)</button>
+            <button type="button" class="btn btn-secondary btn-sm font-size-preset" data-size="16" onclick="App.setFontSize(16)">Orta (16)</button>
+            <button type="button" class="btn btn-secondary btn-sm font-size-preset" data-size="18" onclick="App.setFontSize(18)">Büyük (18)</button>
+            <button type="button" class="btn btn-secondary btn-sm font-size-preset" data-size="20" onclick="App.setFontSize(20)">Çok Büyük (20)</button>
+          </div>
+        </div>
+
+        <div style="background:var(--bg-header);padding:12px;border-radius:10px;border:1px solid var(--border-color);">
+          <strong style="font-size:13px;display:block;margin-bottom:8px;">✒️ 2. Yazı Tipi / Stili Seçin</strong>
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(135px,1fr));gap:6px;">
+            <button type="button" class="btn btn-secondary btn-sm font-family-preset" data-family="modern" style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;" onclick="App.setFontFamily('modern')">Modern Sistem</button>
+            <button type="button" class="btn btn-secondary btn-sm font-family-preset" data-family="rounded" style="font-family:'Trebuchet MS',Verdana,sans-serif;" onclick="App.setFontFamily('rounded')">Yuvarlak &amp; Yumuşak</button>
+            <button type="button" class="btn btn-secondary btn-sm font-family-preset" data-family="serif" style="font-family:Georgia,'Times New Roman',serif;" onclick="App.setFontFamily('serif')">Klasik Kitap (Serif)</button>
+            <button type="button" class="btn btn-secondary btn-sm font-family-preset" data-family="mono" style="font-family:Consolas,'Courier New',monospace;" onclick="App.setFontFamily('mono')">Teknik / Daktilo</button>
+            <button type="button" class="btn btn-secondary btn-sm font-family-preset" data-family="elegant" style="font-family:'Palatino Linotype',Garamond,serif;" onclick="App.setFontFamily('elegant')">Zarif &amp; Akıcı</button>
+          </div>
+        </div>
+
+        <div style="background:var(--bg-header);padding:12px;border-radius:10px;border:1px solid var(--border-color);">
+          <strong style="font-size:13px;display:block;margin-bottom:8px;">🎨 3. Yazı Kalınlığı &amp; Biçimi</strong>
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(95px,1fr));gap:6px;">
+            <button type="button" class="btn btn-secondary btn-sm font-style-preset" data-style="normal" onclick="App.setFontStyleMode('normal')">Normal</button>
+            <button type="button" class="btn btn-secondary btn-sm font-style-preset" data-style="medium" style="font-weight:600;" onclick="App.setFontStyleMode('medium')">Orta Kalın</button>
+            <button type="button" class="btn btn-secondary btn-sm font-style-preset" data-style="bold" style="font-weight:700;" onclick="App.setFontStyleMode('bold')">Kalın (Bold)</button>
+            <button type="button" class="btn btn-secondary btn-sm font-style-preset" data-style="italic" style="font-style:italic;" onclick="App.setFontStyleMode('italic')">Eğik (İtalik)</button>
+          </div>
+        </div>
+
+        <div style="background:var(--bg-app);padding:12px;border-radius:10px;border:1px solid var(--border-color);">
+          <div style="font-size:11.5px;color:var(--text-muted);margin-bottom:6px;">👁️ Canlı Önizleme:</div>
+          <div id="typography-preview-bubble" class="msg-bubble" style="background:var(--bubble-out);color:var(--text-main);max-width:100%;">
+            Merhaba! Seçtiğiniz yazı boyutu ve yazı stili telefon, tablet ve bilgisayarda tüm mesajlara ve ekranlara otomatik sığacak şekilde uygulanır. 📱💻
+          </div>
+        </div>
+
+        <div class="modal-footer" style="justify-content:space-between;flex-wrap:wrap;">
+          <button type="button" class="btn btn-ghost btn-sm" onclick="App.resetTypography()">🔄 Varsayılana Sıfırla</button>
+          <button type="button" class="btn btn-primary" onclick="App.closeModal('typography-modal')">✅ Kaydet ve Kapat</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- WebRTC Sesli ve Görüntülü Arama Tam Ekran Katmanı -->
   <div id="call-overlay" class="call-overlay hidden">
     <div class="call-container">
@@ -606,7 +671,7 @@
     </div>
   </div>
 
-  <script src="/crypto-e2ee.js?v=4.0"></script>
-  <script src="/app.js?v=4.0"></script>
+  <script src="/crypto-e2ee.js?v=5.0"></script>
+  <script src="/app.js?v=5.0"></script>
 </body>
 </html>

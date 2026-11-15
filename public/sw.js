@@ -1,10 +1,10 @@
-// BUILD_VER: 400
+// BUILD_VER: 500
 /**
  * Mesajlaşma Uygulaması - Service Worker (Arka Planda Çalışma ve Bildirim Motoru)
  * Uygulama kapatılsa bile arka planda yeni mesaj ve aramaları kontrol eder ve bildirim gösterir.
  */
 
-const CACHE_NAME = 'mesajlasma-pwa-v7';
+const CACHE_NAME = 'mesajlasma-pwa-v8';
 
 let bgToken = '';
 let lastPollIso = new Date().toISOString();

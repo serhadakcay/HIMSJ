@@ -1,11 +1,12 @@
-// BUILD_VER: 400
+// BUILD_VER: 500
 /**
- * Mesajlaşma Uygulaması - İstemci Uygulama Mantığı (v4.0)
+ * Mesajlaşma Uygulaması - İstemci Uygulama Mantığı (v5.0)
  * - Cep Telefonu Rehberinden Kişi Ekleme (Contact Picker API + Anında Optimistik Kayıt + VCF + Toplu Metin + Manuel)
  * - Numara veya Rehberden Eklenen Kişilere SMS ve WhatsApp Mesajı Gönderme
  *   ("............ Bu numaraları kullanıcı sizi programı kullanmak için ekledi")
  * - Kaydedilen Kişiler Programı Kullandığında Otomatik Numara ve Hesap Entegrasyonu
  * - Gerçek Zamanlı Sesli & Görüntülü Arama (WebRTC + CGNAT WebSocket Ses/Görüntü Rölesi + Sesi Dışarı Verme / Hoparlör)
+ * - Tüm Telefon, Tablet ve Bilgisayar Ekranlarına Otomatik Sığma + Kullanıcıya Özel Yazı Boyutu ve Yazı Stili Seçimi
  * - Aktif Olanları Yeşil (🟢), Aktif Olmayanları Kırmızı (🔴) Yuvarlakla Gösterme
  * - Program Kapatılsa Bile Arka Planda Çalışma İzni (Service Worker + Push/Notification + WakeLock)
  */
@@ -61,9 +62,15 @@ const App = {
   webrtcVideoReceived: false,
   nextPlayTime: 0,
 
+  // Kullanıcıya Özel Yazı Boyutu ve Yazı Stili Ayarları
+  fontSize: Number(localStorage.getItem('msj_font_size') || 14),
+  fontFamilyKey: localStorage.getItem('msj_font_family') || 'modern',
+  fontStyleMode: localStorage.getItem('msj_font_style_mode') || 'normal',
+
   async init() {
     const savedTheme = localStorage.getItem('msj_theme') || 'dark';
     document.documentElement.setAttribute('data-theme', savedTheme);
+    this.applyTypographySettings();
 
     // Eski önbellekleri temizle
     if ('caches' in window) {
@@ -104,13 +111,13 @@ const App = {
       try {
         navigator.serviceWorker.addEventListener('message', (ev) => {
           if (ev.data && ev.data.type === 'SW_FORCE_RELOAD') {
-            if (sessionStorage.getItem('msj_sw_reloaded_v4') !== '1') {
-              sessionStorage.setItem('msj_sw_reloaded_v4', '1');
+            if (sessionStorage.getItem('msj_sw_reloaded_v5') !== '1') {
+              sessionStorage.setItem('msj_sw_reloaded_v5', '1');
               window.location.reload();
             }
           }
         });
-        const reg = await navigator.serviceWorker.register('/sw.js?v=4.0');
+        const reg = await navigator.serviceWorker.register('/sw.js?v=5.0');
         reg.update().catch(() => {});
         if (this.token && reg.active) {
           reg.active.postMessage({ type: 'SET_BG_TOKEN', token: this.token });
@@ -1523,6 +1530,21 @@ const App = {
 
     container.innerHTML = `
       <div style="padding:16px;display:flex;flex-direction:column;gap:14px;">
+        <div style="background:var(--bg-header);padding:14px;border-radius:12px;border-left:4px solid var(--primary);">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
+            <h4>🔤 Yazı Boyutu, Yazı Stili ve Ekran Görünümü</h4>
+            <button class="btn btn-primary btn-sm" onclick="App.openTypographyModal()">Aa Detaylı Görünüm Ayarları</button>
+          </div>
+          <p style="font-size:12px;color:var(--text-muted);margin-bottom:10px;">
+            Aktif Boyut: <strong>${this.fontSize}px</strong> • Yazı Tipi: <strong>${this.getFontFamilyLabel(this.fontFamilyKey)}</strong>
+          </p>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;">
+            <button class="btn btn-secondary btn-sm" onclick="App.stepFontSize(-1)">➖ Yazıyı Küçült</button>
+            <button class="btn btn-secondary btn-sm" onclick="App.stepFontSize(1)">➕ Yazıyı Büyüt</button>
+            <button class="btn btn-secondary btn-sm" onclick="App.resetTypography()">🔄 Varsayılan</button>
+          </div>
+        </div>
+
         <div style="background:var(--bg-header);padding:14px;border-radius:12px;border-left:4px solid #22c55e;">
           <h4 style="margin-bottom:6px;">🔔 Arka Planda Çalışma ve Bildirim İzni</h4>
           <p style="font-size:12px;color:var(--text-muted);margin-bottom:10px;">
@@ -3105,6 +3127,120 @@ const App = {
     input.value += emoji;
     input.focus();
     document.getElementById('emoji-picker').classList.add('hidden');
+  },
+
+  // --- YAZI BOYUTU, YAZI STİLİ VE EKRAN SIĞDIRMA ÖZELLEŞTİRMESİ ---
+  getFontFamilyCss(key) {
+    const map = {
+      modern: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif',
+      rounded: '"Trebuchet MS", "Nunito", Verdana, "Segoe UI", sans-serif',
+      serif: 'Georgia, Cambria, "Times New Roman", Times, serif',
+      mono: 'Consolas, "SFMono-Regular", "Courier New", monospace',
+      elegant: '"Palatino Linotype", "Book Antiqua", Palatino, Garamond, serif'
+    };
+    return map[key] || map.modern;
+  },
+
+  getFontFamilyLabel(key) {
+    const labels = {
+      modern: 'Modern Sistem',
+      rounded: 'Yuvarlak & Yumuşak',
+      serif: 'Klasik Kitap (Serif)',
+      mono: 'Teknik / Daktilo',
+      elegant: 'Zarif & Akıcı'
+    };
+    return labels[key] || 'Modern Sistem';
+  },
+
+  applyTypographySettings() {
+    const size = Math.max(11, Math.min(22, Number(this.fontSize || 14)));
+    this.fontSize = size;
+    const familyKey = this.fontFamilyKey || 'modern';
+    const styleMode = this.fontStyleMode || 'normal';
+
+    const root = document.documentElement;
+    root.style.setProperty('--user-font-size', `${size}px`);
+    root.style.setProperty('--user-msg-font-size', `${(size * 1.03).toFixed(1)}px`);
+    root.style.setProperty('--user-title-font-size', `${(size * 1.05).toFixed(1)}px`);
+    root.style.setProperty('--user-sub-font-size', `${Math.max(11, (size * 0.88).toFixed(1))}px`);
+    root.style.setProperty('--user-font-family', this.getFontFamilyCss(familyKey));
+
+    let weight = '400';
+    let fStyle = 'normal';
+    if (styleMode === 'medium') weight = '600';
+    else if (styleMode === 'bold') weight = '700';
+    else if (styleMode === 'italic') {
+      weight = '400';
+      fStyle = 'italic';
+    }
+    root.style.setProperty('--user-font-weight', weight);
+    root.style.setProperty('--user-font-style', fStyle);
+
+    localStorage.setItem('msj_font_size', String(size));
+    localStorage.setItem('msj_font_family', familyKey);
+    localStorage.setItem('msj_font_style_mode', styleMode);
+
+    // Modal içi göstergeleri güncelle
+    const slider = document.getElementById('font-size-slider');
+    if (slider) slider.value = String(size);
+
+    const badge = document.getElementById('font-size-value-badge');
+    if (badge) {
+      const label =
+        size <= 12 ? 'Küçük' : size <= 14 ? 'Normal' : size <= 16 ? 'Orta' : size <= 18 ? 'Büyük' : 'Çok Büyük';
+      badge.textContent = `${size}px (${label})`;
+    }
+
+    document.querySelectorAll('.font-size-preset').forEach((btn) => {
+      btn.classList.toggle('active', Number(btn.dataset.size) === size);
+    });
+    document.querySelectorAll('.font-family-preset').forEach((btn) => {
+      btn.classList.toggle('active', btn.dataset.family === familyKey);
+    });
+    document.querySelectorAll('.font-style-preset').forEach((btn) => {
+      btn.classList.toggle('active', btn.dataset.style === styleMode);
+    });
+  },
+
+  openTypographyModal() {
+    this.applyTypographySettings();
+    document.getElementById('typography-modal')?.classList.remove('hidden');
+  },
+
+  setFontSize(size) {
+    this.fontSize = Math.max(11, Math.min(22, Number(size || 14)));
+    this.applyTypographySettings();
+    if (this.currentNav === 'settings') {
+      this.renderSidebar();
+    }
+  },
+
+  stepFontSize(delta) {
+    this.setFontSize((Number(this.fontSize) || 14) + Number(delta || 0));
+  },
+
+  setFontFamily(familyKey) {
+    this.fontFamilyKey = familyKey || 'modern';
+    this.applyTypographySettings();
+    if (this.currentNav === 'settings') {
+      this.renderSidebar();
+    }
+  },
+
+  setFontStyleMode(styleMode) {
+    this.fontStyleMode = styleMode || 'normal';
+    this.applyTypographySettings();
+  },
+
+  resetTypography() {
+    this.fontSize = 14;
+    this.fontFamilyKey = 'modern';
+    this.fontStyleMode = 'normal';
+    this.applyTypographySettings();
+    if (this.currentNav === 'settings') {
+      this.renderSidebar();
+    }
+    this.toast('🔤 Yazı boyutu ve stili varsayılan ayarlara döndürüldü.');
   },
 
   toggleTheme() {
