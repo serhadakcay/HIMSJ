@@ -1,6 +1,6 @@
-// BUILD_VER: 500
+// BUILD_VER: 600
 /**
- * Mesajlaşma Uygulaması - İstemci Uygulama Mantığı (v5.0)
+ * Mesajlaşma Uygulaması - İstemci Uygulama Mantığı (v6.0)
  * - Cep Telefonu Rehberinden Kişi Ekleme (Contact Picker API + Anında Optimistik Kayıt + VCF + Toplu Metin + Manuel)
  * - Numara veya Rehberden Eklenen Kişilere SMS ve WhatsApp Mesajı Gönderme
  *   ("............ Bu numaraları kullanıcı sizi programı kullanmak için ekledi")
@@ -117,7 +117,7 @@ const App = {
             }
           }
         });
-        const reg = await navigator.serviceWorker.register('/sw.js?v=5.0');
+        const reg = await navigator.serviceWorker.register('/sw.js?v=6.0');
         reg.update().catch(() => {});
         if (this.token && reg.active) {
           reg.active.postMessage({ type: 'SET_BG_TOKEN', token: this.token });
@@ -332,26 +332,31 @@ const App = {
     window.location.href = `https://${location.hostname}:3443${query}`;
   },
 
-  importFromPhoneContactsApi() {
-    // ÖNEMLİ: Mobil tarayıcılarda (Android Chrome / Edge vb.) kullanıcı dokunma izninin (User Gesture)
-    // kaybolmaması için navigator.contacts.select() çağrısı önünde hiçbir await kullanılmamalıdır!
+  importFromPhoneContactsApi(multiple = false) {
+    // ÖNEMLİ:
+    // 1. Mobil tarayıcılarda (Android Chrome / Samsung / Edge) kullanıcı dokunma izninin (User Gesture)
+    //    kaybolmaması için navigator.contacts.select() çağrısı önünde hiçbir await kullanılmamalıdır!
+    // 2. multiple: false kullanıldığında Android rehber ekranında ("Kişilerin bilgilerini paylaşın")
+    //    sağ üstteki pasif "Bitti" butonuna basmaya gerek kalmadan, kişi satırına (örn. Cem ORTİ)
+    //    dokunulduğu anda kişi otomatik seçilir ve programa aktarılır!
     if (navigator.contacts && typeof navigator.contacts.select === 'function') {
+      const useMultiple = Boolean(multiple);
       let pickerPromise;
       try {
-        pickerPromise = navigator.contacts.select(['name', 'tel'], { multiple: true });
+        pickerPromise = navigator.contacts.select(['name', 'tel'], { multiple: useMultiple });
       } catch {
-        pickerPromise = navigator.contacts.select(['tel'], { multiple: true });
+        pickerPromise = navigator.contacts.select(['tel'], { multiple: useMultiple });
       }
 
       Promise.resolve(pickerPromise)
         .catch((err) => {
           if (err && err.name === 'TypeError') {
-            return navigator.contacts.select(['tel'], { multiple: true });
+            return navigator.contacts.select(['tel'], { multiple: useMultiple });
           }
           throw err;
         })
         .then(async (selected) => {
-          if (!selected || selected.length === 0) {
+          if (!selected || (Array.isArray(selected) && selected.length === 0)) {
             return;
           }
           await this.processPickedPhoneContacts(selected);
@@ -539,6 +544,46 @@ const App = {
           smsUrl: oc.smsUrl || this.users[existsIdx].smsUrl
         };
       }
+
+      // Sohbetler listesine de anında ekle
+      const convExists = this.conversations.some(
+        (c) =>
+          c.type === 'direct' &&
+          c.peer &&
+          (c.peer.user_id === oc.id ||
+            (oc.phoneNormalized && this.normalizePhoneClient(c.peer.phone) === oc.phoneNormalized))
+      );
+      if (!convExists) {
+        this.conversations.unshift({
+          id: oc.conversationId || ('conv_' + oc.id),
+          type: 'direct',
+          title: oc.display_name,
+          description: oc.phone || '',
+          avatarColor: oc.avatar_color || '#10b981',
+          myRole: 'member',
+          pinned: false,
+          muted: false,
+          unreadCount: 0,
+          peer: {
+            user_id: oc.id,
+            username: oc.username,
+            display_name: oc.display_name,
+            phone: oc.phone,
+            isRegistered: Boolean(oc.isRegistered),
+            online: Boolean(oc.online)
+          },
+          lastMessage: {
+            id: 'msg_' + Date.now(),
+            senderId: (this.user && this.user.id) || '',
+            senderName: (this.user && this.user.display_name) || 'Ben',
+            msgType: 'text',
+            content: oc.inviteText,
+            isEncrypted: false,
+            status: 'sent',
+            createdAt: new Date().toISOString()
+          }
+        });
+      }
     }
   },
 
@@ -550,22 +595,34 @@ const App = {
 
       for (const c of list) {
         if (!c) continue;
-        const rawNameArr = this.toArraySafe(c.name);
+        const rawNameArr = this.toArraySafe(c.name || c.displayName || c.fullName);
         const cleanName = rawNameArr
-          .map((n) => String(n || '').replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, '').trim())
+          .map((n) => {
+            if (n && typeof n === 'object') {
+              return String(n.display || n.formatted || n.givenName || n.name || '').trim();
+            }
+            return String(n || '').replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, '').trim();
+          })
           .filter(Boolean)
           .join(' ') || String(c.displayName || '').trim();
 
         const rawTelArr = [
           ...this.toArraySafe(c.tel),
           ...this.toArraySafe(c.phone),
-          ...this.toArraySafe(c.phones)
+          ...this.toArraySafe(c.phones),
+          ...this.toArraySafe(c.numbers)
         ];
         const cleanPhones = rawTelArr
-          .map((p) => String(p || '').replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, '').trim())
+          .map((p) => {
+            if (p && typeof p === 'object') {
+              p = p.value || p.number || p.tel || p.phone || '';
+            }
+            return String(p || '').replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, '').trim();
+          })
           .filter(Boolean);
 
         if (cleanPhones.length > 0) {
+          // Aynı kişide (+ 2 tane daha) gibi birden fazla numara varsa ilk geçerli numarayı ana numara olarak al ve mükerrerleri ele
           for (const tel of cleanPhones) {
             const norm = this.normalizePhoneClient(tel) || tel;
             const dedupKey = `${cleanName.toLowerCase()}|${norm}`;
@@ -593,14 +650,31 @@ const App = {
         return;
       }
 
-      // 1. ANINDA (0ms gecikmeyle) kişiyi ekrana, Rehber sekmesine ve yerel hafızaya ekle!
-      // Böylece sunucu uyansa da sıfırlansa da kişi anında eklenir ve asla eski ekranda kalmaz.
+      // Form kutularına da seçilen kişinin adını ve numarasını anında yaz
+      const nameInput = document.getElementById('contact-name-input');
+      const phoneInput = document.getElementById('contact-phone-input');
+      const bulkInput = document.getElementById('bulk-contacts-input');
+      if (nameInput) nameInput.value = formatted[0].name || '';
+      if (phoneInput && formatted[0].phone) phoneInput.value = formatted[0].phone;
+      if (bulkInput) {
+        bulkInput.value = formatted.map((f) => `${f.name} ${f.phone}`.trim()).join('\n');
+      }
+
+      // 1. ANINDA (0ms gecikmeyle) kişiyi Rehber (contacts) ve Sohbetler (chats) listesine ekle!
+      // ÖNEMLİ: switchNav('contacts') yerine doğrudan sekme görünümünü güncelliyoruz ki
+      // sunucu kaydı bitmeden önce loadUsers() çalışıp listeyi ezmesin!
       const optimisticContacts = this.buildOptimisticContacts(formatted);
       this.applyOptimisticContactsToUi(optimisticContacts);
 
       this.closeModal('contact-modal');
-      this.switchNav('contacts');
+      this.currentNav = 'contacts';
+      document.body.classList.remove('mobile-chat-open');
+      document.querySelectorAll('.nav-item').forEach((btn) => {
+        btn.classList.toggle('active', btn.dataset.nav === 'contacts');
+      });
+      document.getElementById('chat-filter-bar')?.classList.add('hidden');
       this.renderSidebar();
+
       this.toast(`✅ Telefon rehberinizden ${optimisticContacts.length} kişi (${optimisticContacts.map((x) => x.display_name).join(', ')}) eklendi!`);
       this.openInviteModal({
         importedCount: optimisticContacts.length,
@@ -608,7 +682,7 @@ const App = {
         inviteMessage: optimisticContacts[0].inviteText
       });
 
-      // 2. Arka planda sunucu veritabanıyla senkronize et ve gerçek sohbet/kullanıcı ID'lerini güncelle
+      // 2. Şimdi sunucu veritabanına kaydet ve tamamlandığında gerçek ID'leri yükle
       const res = await this.syncContactsWithRetry({
         contacts: formatted,
         inviteChannel: 'auto',
@@ -1163,8 +1237,56 @@ const App = {
   },
 
   async loadConversations() {
-    const data = await this.api('/api/conversations');
-    this.conversations = data.conversations || [];
+    try {
+      const data = await this.api('/api/conversations');
+      this.conversations = data.conversations || [];
+    } catch {
+      this.conversations = this.conversations || [];
+    }
+
+    // Yerel rehber kişilerinden henüz sunucuda sohbeti görünmeyenleri Sohbetler listesinde de koru
+    const localContacts = this.getSavedLocalContacts();
+    for (const lc of localContacts) {
+      const lcNorm = lc.phoneNormalized || this.normalizePhoneClient(lc.phone);
+      const exists = this.conversations.some(
+        (c) =>
+          c.type === 'direct' &&
+          c.peer &&
+          (c.peer.user_id === lc.id || (lcNorm && this.normalizePhoneClient(c.peer.phone) === lcNorm))
+      );
+      if (!exists) {
+        this.conversations.push({
+          id: lc.conversationId || ('conv_' + lc.id),
+          type: 'direct',
+          title: lc.display_name,
+          description: lc.phone || '',
+          avatarColor: lc.avatar_color || '#10b981',
+          myRole: 'member',
+          pinned: false,
+          muted: false,
+          unreadCount: 0,
+          peer: {
+            user_id: lc.id,
+            username: lc.username || 'tel',
+            display_name: lc.display_name,
+            phone: lc.phone,
+            isRegistered: Boolean(lc.isRegistered),
+            online: Boolean(lc.online)
+          },
+          lastMessage: {
+            id: 'msg_local_' + lc.id,
+            senderId: (this.user && this.user.id) || '',
+            senderName: (this.user && this.user.display_name) || 'Ben',
+            msgType: 'text',
+            content: lc.inviteText || `${lc.phone} — Bu numaraları kullanıcı sizi programı kullanmak için ekledi`,
+            isEncrypted: false,
+            status: 'sent',
+            createdAt: new Date().toISOString()
+          }
+        });
+      }
+    }
+
     if (this.currentNav === 'chats' || this.currentNav === 'channels') {
       this.renderSidebar();
     }
@@ -1207,7 +1329,7 @@ const App = {
           if (res && res.contacts && res.contacts.length > 0) {
             this.saveContactsLocally(res.contacts);
             const fresh = await this.api('/api/users').catch(() => null);
-            if (fresh && fresh.users) {
+            if (fresh && Array.isArray(fresh.users) && fresh.users.length > 0) {
               this.users = fresh.users;
               if (this.currentNav === 'contacts') this.renderSidebar();
             }

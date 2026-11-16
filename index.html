@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- BUILD_VER: 500 -->
+<!-- BUILD_VER: 600 -->
 <html lang="tr" data-theme="dark">
 <head>
   <meta charset="UTF-8" />
@@ -12,7 +12,7 @@
   <link rel="manifest" href="/manifest.json" />
   <link rel="icon" type="image/svg+xml" href="/icon.svg" />
   <link rel="apple-touch-icon" href="/icon.svg" />
-  <link rel="stylesheet" href="/style.css?v=5.0" />
+  <link rel="stylesheet" href="/style.css?v=6.0" />
 </head>
 <body>
   <!-- Bildirim Toast Alanı -->
@@ -316,13 +316,16 @@
             Telefon rehberinizden bir veya birden fazla kişi seçin ya da rehberden paylaşılan kişi kartını (`.vcf`) yükleyin:
           </p>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
-            <button type="button" class="btn btn-primary btn-sm" onclick="App.importFromPhoneContactsApi()">
+            <button type="button" class="btn btn-primary btn-sm" onclick="App.importFromPhoneContactsApi(false)">
               📱 Rehberden Kişi Seç
             </button>
             <label for="vcf-file-input" class="btn btn-secondary btn-sm" style="cursor:pointer;display:inline-flex;align-items:center;justify-content:center;margin:0;">
               📂 Rehber / Kişi Kartı (.vcf) Seç
             </label>
           </div>
+          <button type="button" class="btn btn-secondary btn-block btn-sm" style="margin-top:6px;" onclick="App.importFromPhoneContactsApi(true)">
+            👥 Rehberden Birden Fazla Kişi Seç (Çoklu Seçim)
+          </button>
         </div>
 
         <!-- 2. Manuel Numara / Kişi Ekleme ve Anında SMS / WhatsApp Mesajı Gönderme -->
@@ -671,7 +674,7 @@
     </div>
   </div>
 
-  <script src="/crypto-e2ee.js?v=5.0"></script>
-  <script src="/app.js?v=5.0"></script>
+  <script src="/crypto-e2ee.js?v=6.0"></script>
+  <script src="/app.js?v=6.0"></script>
 </body>
 </html>
