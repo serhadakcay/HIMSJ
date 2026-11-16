@@ -1,4 +1,4 @@
-// BUILD_VER: 601
+// BUILD_VER: 602
 /**
  * Mesajlaşma Uygulaması - İstemci Uygulama Mantığı (v6.0)
  * - Cep Telefonu Rehberinden Kişi Ekleme (Contact Picker API + Anında Optimistik Kayıt + VCF + Toplu Metin + Manuel)
@@ -637,7 +637,10 @@ const App = {
         return;
       }
 
-      // Form kutularına da seçilen kişinin adını ve numarasını anında yaz
+      // 1. Android sekme yenilemesine karşı seçilen kişileri ANINDA kalıcı kuyruğa (localStorage) kaydet!
+      localStorage.setItem('msj_pending_phone_import', JSON.stringify(formatted));
+
+      // Form kutularına da seçilen kişinin adını ve numarasını anında yaz (yedek)
       const nameInput = document.getElementById('contact-name-input');
       const phoneInput = document.getElementById('contact-phone-input');
       const bulkInput = document.getElementById('bulk-contacts-input');
@@ -647,56 +650,71 @@ const App = {
         bulkInput.value = formatted.map((f) => `${f.name} ${f.phone}`.trim()).join('\n');
       }
 
-      // 1. ANINDA (0ms gecikmeyle) kişiyi Rehber (contacts) ve Sohbetler (chats) listesine ekle
-      const optimisticContacts = this.buildOptimisticContacts(formatted);
-      this.applyOptimisticContactsToUi(optimisticContacts);
+      // 2. Bekleyen kuyruğu işleyen kalıcı kayıt fonksiyonunu çalıştır
+      await this.flushPendingPhoneImport();
+    } catch (err) {
+      console.error('Rehber aktarım hatası:', err);
+      this.toast('❌ Rehber aktarım hatası: ' + (err.message || 'Bilinmeyen hata'), 'error');
+    }
+  },
 
-      this.closeModal('contact-modal');
-      this.currentNav = 'contacts';
-      document.body.classList.remove('mobile-chat-open');
-      document.querySelectorAll('.nav-item').forEach((btn) => {
-        btn.classList.toggle('active', btn.dataset.nav === 'contacts');
-      });
-      document.getElementById('chat-filter-bar')?.classList.add('hidden');
-      this.renderSidebar();
+  async flushPendingPhoneImport() {
+    if (this._flushingPhoneImport) return;
+    const raw = localStorage.getItem('msj_pending_phone_import');
+    if (!raw) return;
 
-      this.toast(`⏳ ${optimisticContacts.length} kişi (${optimisticContacts.map((x) => x.display_name).join(', ')}) sunucuya kaydediliyor...`);
-      this.openInviteModal({
-        importedCount: optimisticContacts.length,
-        contacts: optimisticContacts,
-        inviteMessage: optimisticContacts[0].inviteText
-      });
+    let formatted = [];
+    try {
+      formatted = JSON.parse(raw);
+    } catch {
+      localStorage.removeItem('msj_pending_phone_import');
+      return;
+    }
+    if (!Array.isArray(formatted) || formatted.length === 0) {
+      localStorage.removeItem('msj_pending_phone_import');
+      return;
+    }
 
-      // Android rehber ekranından dönüşte ağ soketinin uyanması için kısa bekleme
-      await new Promise((r) => setTimeout(r, 450));
+    this._flushingPhoneImport = true;
+    try {
+      // Android rehber ekranından dönüşte ağ soketinin tam uyanması için kısa bekleme
+      await new Promise((r) => setTimeout(r, 600));
 
-      // 2. Sunucu veritabanına kaydet ve tamamlandığında gerçek ID'leri yükle
+      this.toast(`⏳ ${formatted.length} kişi (${formatted.map((x) => x.name).join(', ')}) rehbere kaydediliyor...`);
+
       const res = await this.syncContactsWithRetry({
         contacts: formatted,
         inviteChannel: 'auto',
         appUrl: location.origin
       });
 
+      // Başarılı olduysa bekleyen kuyruğu temizle
+      localStorage.removeItem('msj_pending_phone_import');
+
       if (res && res.contacts && res.contacts.length > 0) {
-        // Geçici 'local_' kayıtlarını temizle, sunucudan gelen kalıcı kayıtları yaz
         this.users = this.users.filter((u) => !String(u.id).startsWith('local_'));
         const localKey = `msj_saved_contacts_${(this.user && this.user.id) || 'default'}`;
         const cleanedLocal = this.getSavedLocalContacts().filter((c) => !String(c.id).startsWith('local_'));
         localStorage.setItem(localKey, JSON.stringify(cleanedLocal));
 
         this.saveContactsLocally(res.contacts);
+        this.closeModal('contact-modal');
         await Promise.all([this.loadUsers(), this.loadConversations()]);
-        this.renderSidebar();
-        this.lastInvitedContacts = res.contacts;
-        this.refreshInviteModalLinks();
+        this.switchNav('contacts');
         this.toast(`✅ ${res.contacts.length} kişi rehberinize kalıcı olarak kaydedildi!`);
+        this.openInviteModal({
+          importedCount: res.contacts.length,
+          contacts: res.contacts,
+          inviteMessage: res.inviteMessage || res.contacts[0].inviteText
+        });
       } else {
         this.toast('⚠️ Sunucu boş yanıt döndürdü, kayıt doğrulanamadı.', 'error');
       }
     } catch (err) {
       console.error('Rehber kayıt hatası:', err);
-      this.toast('❌ Sunucuya kaydedilemedi: ' + (err.message || 'Bağlantı hatası'), 'error');
-      this.renderSidebar();
+      this.toast('⚠️ Ağ bekleniyor, tekrar denenecek: ' + (err.message || 'Bağlantı hatası'), 'error');
+    } finally {
+      this._flushingPhoneImport = false;
     }
   },
 
@@ -3383,4 +3401,13 @@ const App = {
   }
 };
 
-window.addEventListener('DOMContentLoaded', () => App.init());
+window.addEventListener('DOMContentLoaded', async () => {
+  await App.init();
+  await App.flushPendingPhoneImport();
+});
+
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && App.token) {
+    App.flushPendingPhoneImport();
+  }
+});
