@@ -127,6 +127,11 @@ try {
     DELETE FROM conversations WHERE id IN ('conv_proje_ekibi', 'conv_duyuru_kanali', 'conv_dm_ayse');
   `);
 
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_contacts_user_contact
+    ON contacts(user_id, contact_user_id);
+  `);
+
   const usersWithoutNorm = db.prepare("SELECT id, phone FROM users WHERE phone != '' AND (phone_normalized IS NULL OR phone_normalized = '')").all();
   for (const u of usersWithoutNorm) {
     db.prepare('UPDATE users SET phone_normalized = ? WHERE id = ?').run(normalizePhone(u.phone), u.id);
@@ -367,7 +372,8 @@ function resolveOrRestoreSession(token, req) {
     const rawHeader = (req && req.headers && req.headers['x-user-profile']) || '';
     if (rawHeader) {
       try {
-        const jsonStr = Buffer.from(String(rawHeader), 'base64').toString('utf8');
+        const latin1Str = Buffer.from(String(rawHeader), 'base64').toString('latin1');
+        const jsonStr = decodeURIComponent(escape(latin1Str));
         profile = JSON.parse(jsonStr);
       } catch {}
     }

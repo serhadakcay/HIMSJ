@@ -1,4 +1,4 @@
-// BUILD_VER: 600
+// BUILD_VER: 601
 /**
  * Mesajlaşma Uygulaması - İstemci Uygulama Mantığı (v6.0)
  * - Cep Telefonu Rehberinden Kişi Ekleme (Contact Picker API + Anında Optimistik Kayıt + VCF + Toplu Metin + Manuel)
@@ -117,7 +117,7 @@ const App = {
             }
           }
         });
-        const reg = await navigator.serviceWorker.register('/sw.js?v=6.0');
+        const reg = await navigator.serviceWorker.register('/sw.js?v=6.1');
         reg.update().catch(() => {});
         if (this.token && reg.active) {
           reg.active.postMessage({ type: 'SET_BG_TOKEN', token: this.token });
@@ -159,15 +159,12 @@ const App = {
     }
     try {
       const prof = this.user || JSON.parse(localStorage.getItem('msj_user_profile') || 'null');
-      if (prof) {
+      if (prof && prof.id) {
         headers['X-User-Profile'] = btoa(unescape(encodeURIComponent(JSON.stringify({
           id: prof.id,
           username: prof.username,
           display_name: prof.display_name,
-          phone: prof.phone,
-          avatar_color: prof.avatar_color,
-          public_key: prof.public_key,
-          key_fingerprint: prof.key_fingerprint
+          phone: prof.phone
         }))));
       }
     } catch {}
@@ -333,12 +330,18 @@ const App = {
   },
 
   importFromPhoneContactsApi(multiple = false) {
-    // ÖNEMLİ:
-    // 1. Mobil tarayıcılarda (Android Chrome / Samsung / Edge) kullanıcı dokunma izninin (User Gesture)
-    //    kaybolmaması için navigator.contacts.select() çağrısı önünde hiçbir await kullanılmamalıdır!
-    // 2. multiple: false kullanıldığında Android rehber ekranında ("Kişilerin bilgilerini paylaşın")
-    //    sağ üstteki pasif "Bitti" butonuna basmaya gerek kalmadan, kişi satırına (örn. Cem ORTİ)
-    //    dokunulduğu anda kişi otomatik seçilir ve programa aktarılır!
+    const isInsecureRemote =
+      location.protocol === 'http:' &&
+      location.hostname !== 'localhost' &&
+      location.hostname !== '127.0.0.1';
+    if (isInsecureRemote) {
+      this.openContactModal();
+      this.toast('🔒 Doğrudan rehber erişimi için üstteki "Güvenli Bağlantıya (HTTPS) Geç" butonuna basın veya .vcf dosyası seçin.', 'error');
+      return;
+    }
+
+    // ÖNEMLİ: Kullanıcı dokunma izninin (User Gesture) kaybolmaması için
+    // navigator.contacts.select() çağrısı önünde hiçbir await kullanılmamalıdır!
     if (navigator.contacts && typeof navigator.contacts.select === 'function') {
       const useMultiple = Boolean(multiple);
       let pickerPromise;
@@ -369,31 +372,22 @@ const App = {
           if (modal && modal.classList.contains('hidden')) {
             this.openContactModal();
           }
-          this.toast('📱 Doğrudan rehber seçici açılamadı. Kişi Kartı (.vcf) seçebilir veya numara yazabilirsiniz.');
+          this.toast('❌ Rehber seçici hatası: ' + (err && err.message ? err.message : 'Açılış başarısız'), 'error');
         });
       return;
     }
 
-    // Contact Picker API bu bağlantıda kapalıysa (örn. iOS Safari, Masaüstü veya HTTP bağlantı):
-    // Kullanıcı dokunuşu (User Gesture) aktifken eşzamanlı olarak dosya seçiciyi ve rehber penceresini aç
+    // Contact Picker API bu tarayıcıda desteklenmiyorsa (örn. iPhone / iOS Safari veya Masaüstü):
+    // Zorla dosya yöneticisi açmak yerine modalı açıp kullanıcıyı bilgilendir
     const modal = document.getElementById('contact-modal');
     if (modal && modal.classList.contains('hidden')) {
       this.openContactModal();
     }
-    const vcfInput = document.getElementById('vcf-file-input');
-    if (vcfInput) {
-      try {
-        vcfInput.click();
-      } catch {}
-    }
-    const isInsecureRemote =
-      location.protocol === 'http:' &&
-      location.hostname !== 'localhost' &&
-      location.hostname !== '127.0.0.1';
-    if (isInsecureRemote) {
-      this.toast('🔒 Doğrudan telefon rehberi penceresi için üstteki "Güvenli Bağlantıya (HTTPS) Geç" butonuna dokunabilir veya .vcf dosyası seçebilirsiniz.');
+    const isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent || '');
+    if (isIOS) {
+      this.toast('🍏 iPhone (Safari) doğrudan rehber erişimini kısıtlar. Kişi Kartı (.vcf) seçebilir veya numara yazabilirsiniz.');
     } else {
-      this.toast('📱 Rehber dosyanızı (.vcf / Kişi Kartı) seçebilir veya numaraları aşağıdan ekleyebilirsiniz.');
+      this.toast('📱 Bu tarayıcı doğrudan rehber erişimini desteklemiyor. Kişi Kartı (.vcf) seçebilir veya numara yazabilirsiniz.');
     }
   },
 
@@ -589,14 +583,17 @@ const App = {
 
   async processPickedPhoneContacts(selected) {
     try {
-      const list = this.toArraySafe(selected);
+      const list = Array.isArray(selected) ? selected : Array.from(selected || []);
       const formatted = [];
       const seenNormPhones = new Set();
 
       for (const c of list) {
         if (!c) continue;
-        const rawNameArr = this.toArraySafe(c.name || c.displayName || c.fullName);
-        const cleanName = rawNameArr
+        // ContactInfo getter özelliklerini doğrudan oku
+        const names = c.name ? (Array.isArray(c.name) ? c.name : Array.from(c.name)) : [];
+        const tels = c.tel ? (Array.isArray(c.tel) ? c.tel : Array.from(c.tel)) : [];
+
+        const cleanName = names
           .map((n) => {
             if (n && typeof n === 'object') {
               return String(n.display || n.formatted || n.givenName || n.name || '').trim();
@@ -606,13 +603,7 @@ const App = {
           .filter(Boolean)
           .join(' ') || String(c.displayName || '').trim();
 
-        const rawTelArr = [
-          ...this.toArraySafe(c.tel),
-          ...this.toArraySafe(c.phone),
-          ...this.toArraySafe(c.phones),
-          ...this.toArraySafe(c.numbers)
-        ];
-        const cleanPhones = rawTelArr
+        const cleanPhones = tels
           .map((p) => {
             if (p && typeof p === 'object') {
               p = p.value || p.number || p.tel || p.phone || '';
@@ -622,7 +613,6 @@ const App = {
           .filter(Boolean);
 
         if (cleanPhones.length > 0) {
-          // Aynı kişide (+ 2 tane daha) gibi birden fazla numara varsa ilk geçerli numarayı ana numara olarak al ve mükerrerleri ele
           for (const tel of cleanPhones) {
             const norm = this.normalizePhoneClient(tel) || tel;
             const dedupKey = `${cleanName.toLowerCase()}|${norm}`;
@@ -642,11 +632,8 @@ const App = {
         }
       }
 
-      if (formatted.length === 0 && list.length > 0) {
-        formatted.push({ name: 'Rehber Kişisi', phone: '' });
-      }
-
       if (formatted.length === 0) {
+        this.toast('⚠️ Seçilen kişide geçerli isim veya telefon numarası bulunamadı.', 'error');
         return;
       }
 
@@ -660,9 +647,7 @@ const App = {
         bulkInput.value = formatted.map((f) => `${f.name} ${f.phone}`.trim()).join('\n');
       }
 
-      // 1. ANINDA (0ms gecikmeyle) kişiyi Rehber (contacts) ve Sohbetler (chats) listesine ekle!
-      // ÖNEMLİ: switchNav('contacts') yerine doğrudan sekme görünümünü güncelliyoruz ki
-      // sunucu kaydı bitmeden önce loadUsers() çalışıp listeyi ezmesin!
+      // 1. ANINDA (0ms gecikmeyle) kişiyi Rehber (contacts) ve Sohbetler (chats) listesine ekle
       const optimisticContacts = this.buildOptimisticContacts(formatted);
       this.applyOptimisticContactsToUi(optimisticContacts);
 
@@ -675,14 +660,17 @@ const App = {
       document.getElementById('chat-filter-bar')?.classList.add('hidden');
       this.renderSidebar();
 
-      this.toast(`✅ Telefon rehberinizden ${optimisticContacts.length} kişi (${optimisticContacts.map((x) => x.display_name).join(', ')}) eklendi!`);
+      this.toast(`⏳ ${optimisticContacts.length} kişi (${optimisticContacts.map((x) => x.display_name).join(', ')}) sunucuya kaydediliyor...`);
       this.openInviteModal({
         importedCount: optimisticContacts.length,
         contacts: optimisticContacts,
         inviteMessage: optimisticContacts[0].inviteText
       });
 
-      // 2. Şimdi sunucu veritabanına kaydet ve tamamlandığında gerçek ID'leri yükle
+      // Android rehber ekranından dönüşte ağ soketinin uyanması için kısa bekleme
+      await new Promise((r) => setTimeout(r, 450));
+
+      // 2. Sunucu veritabanına kaydet ve tamamlandığında gerçek ID'leri yükle
       const res = await this.syncContactsWithRetry({
         contacts: formatted,
         inviteChannel: 'auto',
@@ -690,14 +678,24 @@ const App = {
       });
 
       if (res && res.contacts && res.contacts.length > 0) {
+        // Geçici 'local_' kayıtlarını temizle, sunucudan gelen kalıcı kayıtları yaz
+        this.users = this.users.filter((u) => !String(u.id).startsWith('local_'));
+        const localKey = `msj_saved_contacts_${(this.user && this.user.id) || 'default'}`;
+        const cleanedLocal = this.getSavedLocalContacts().filter((c) => !String(c.id).startsWith('local_'));
+        localStorage.setItem(localKey, JSON.stringify(cleanedLocal));
+
         this.saveContactsLocally(res.contacts);
         await Promise.all([this.loadUsers(), this.loadConversations()]);
         this.renderSidebar();
         this.lastInvitedContacts = res.contacts;
         this.refreshInviteModalLinks();
+        this.toast(`✅ ${res.contacts.length} kişi rehberinize kalıcı olarak kaydedildi!`);
+      } else {
+        this.toast('⚠️ Sunucu boş yanıt döndürdü, kayıt doğrulanamadı.', 'error');
       }
     } catch (err) {
-      // Sunucu geçici olarak yanıt vermese bile kişi yerel rehbere ve ekrana zaten eklendi!
+      console.error('Rehber kayıt hatası:', err);
+      this.toast('❌ Sunucuya kaydedilemedi: ' + (err.message || 'Bağlantı hatası'), 'error');
       this.renderSidebar();
     }
   },
