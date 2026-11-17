@@ -307,6 +307,7 @@ function initSchema() {
   try { db.exec("ALTER TABLE contacts ADD COLUMN invited_via TEXT DEFAULT ''"); } catch {}
   try { db.exec("ALTER TABLE contacts ADD COLUMN invited_at TEXT DEFAULT NULL"); } catch {}
   try { db.exec("ALTER TABLE sessions ADD COLUMN bg_permission INTEGER DEFAULT 0"); } catch {}
+  try { db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_contacts_user_contact ON contacts(user_id, contact_user_id)"); } catch {}
 
   // Eskiden kalan deneme (demo) hesaplarını ve sohbetlerini otomatik temizle
   db.exec(`

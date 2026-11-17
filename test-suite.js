@@ -70,7 +70,13 @@ async function runTests() {
     assert(tokenKaan, 'Token üretilmeli');
     console.log('[OK] 3. Yeni kullanıcı kaydı (boş veritabanı üzerinde) başarılı.');
 
-    // 4. Cep telefonu rehberinden kişi ekleme (Contact Picker + VCF Quoted-Printable + iPhone item1.TEL + Manuel)
+    // 4. Cep telefonu rehberinden kişi ekleme (Contact Picker + VCF Quoted-Printable + iPhone item1.TEL + Manuel + Canlı Numara Sorgulama)
+    // 4a. WhatsApp / Telegram tarzı canlı numara sorgulama (lookup)
+    const lookupBefore = await req('/api/contacts/lookup?phone=05423832663', 'GET', null, tokenKaan);
+    assert.strictEqual(lookupBefore.status, 200);
+    assert.strictEqual(lookupBefore.data.valid, true);
+    assert.strictEqual(lookupBefore.data.isRegistered, false);
+
     const vcfSample = [
       'BEGIN:VCARD',
       'VERSION:2.1',
@@ -90,7 +96,8 @@ async function runTests() {
       {
         contacts: [
           { name: 'Burak Kaya', phone: '0555 444 33 22' },
-          // Android Chrome Contact Picker API ham formatı:
+          // Android Chrome Contact Picker API ham formatı (+2 tane daha çoklu numara):
+          { name: ['Cem ORTİ'], tel: ['05423832663', '+905423832663', '0542 383 26 63'] },
           { name: ['Zeynep Aydın'], tel: ['+90 536 789 01 23'] },
           // Kullanıcının kendi telefon numarasını rehberden seçmesi durumu:
           { name: ['Kaan Kendi Numaram'], tel: ['0532 111 22 33'] }
@@ -101,7 +108,11 @@ async function runTests() {
       tokenKaan
     );
     assert.strictEqual(syncRes.status, 200);
-    assert.strictEqual(syncRes.data.importedCount, 5, 'Manuel, Contact Picker ham formatı, kendi numarası ve Android/iPhone VCF kişileri eksiksiz eklenmeli');
+    assert.strictEqual(syncRes.data.importedCount, 6, 'Cem ORTİ (+2 numara), Manuel, Contact Picker, kendi numarası ve Android/iPhone VCF kişileri eksiksiz eklenmeli');
+
+    const cemContact = syncRes.data.contacts.find((c) => c.display_name.includes('Cem ORTİ') || c.phone.includes('542'));
+    assert(cemContact, 'Cem ORTİ rehbere eklenmiş olmalı');
+    assert(cemContact.whatsappUrl.includes('5423832663'), 'Cem ORTİ WhatsApp linki içermeli');
 
     // 5. SMS ve WhatsApp davet mesajı içeriğini doğrula
     assert(

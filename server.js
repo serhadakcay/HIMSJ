@@ -127,6 +127,11 @@ try {
     DELETE FROM conversations WHERE id IN ('conv_proje_ekibi', 'conv_duyuru_kanali', 'conv_dm_ayse');
   `);
 
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_contacts_user_contact
+    ON contacts(user_id, contact_user_id);
+  `);
+
   const usersWithoutNorm = db.prepare("SELECT id, phone FROM users WHERE phone != '' AND (phone_normalized IS NULL OR phone_normalized = '')").all();
   for (const u of usersWithoutNorm) {
     db.prepare('UPDATE users SET phone_normalized = ? WHERE id = ?').run(normalizePhone(u.phone), u.id);
@@ -367,12 +372,24 @@ function resolveOrRestoreSession(token, req) {
     const rawHeader = (req && req.headers && req.headers['x-user-profile']) || '';
     if (rawHeader) {
       try {
-        const jsonStr = Buffer.from(String(rawHeader), 'base64').toString('utf8');
+        const latin1Str = Buffer.from(String(rawHeader), 'base64').toString('latin1');
+        const jsonStr = decodeURIComponent(escape(latin1Str));
         profile = JSON.parse(jsonStr);
       } catch {}
     }
 
     const tokenHash = crypto.createHash('sha1').update(token).digest('hex');
+    if (!profile || (!profile.display_name && !profile.username && !profile.phone)) {
+      const singleUser = db.prepare("SELECT * FROM users WHERE is_registered = 1 AND username != 'kullanici' ORDER BY created_at DESC LIMIT 1").get();
+      if (!singleUser) return null;
+      const clientIp = (req && req.socket && req.socket.remoteAddress) || 'unknown';
+      db.prepare(`
+        INSERT OR IGNORE INTO sessions (token, user_id, device_name, device_platform, ip_address)
+        VALUES (?, ?, 'Mobil/Web Otomatik Oturum', 'Web', ?)
+      `).run(token, singleUser.id, clientIp);
+      return querySession() || null;
+    }
+
     const rawPhone = String((profile && profile.phone) || '').trim();
     const normPhone = normalizePhone(rawPhone);
     const displayPhone = rawPhone ? formatPhoneDisplay(rawPhone) : '';
@@ -1334,6 +1351,31 @@ async function handleRequest(req, res) {
         const prefix = pathname.split('/').pop();
         db.prepare('DELETE FROM sessions WHERE user_id = ? AND substr(token, 1, 10) = ?').run(auth.id, prefix);
         return sendJson(res, 200, { ok: true });
+      }
+
+      // --- WHATSAPP / TELEGRAM TARZI CANLI TELEFON NUMARASI SORGULAMA VE REHBER KAYDI ---
+      if (pathname === '/api/contacts/lookup' && req.method === 'GET') {
+        const rawPhone = String(parsedUrl.searchParams.get('phone') || '').trim();
+        const normPhone = normalizePhone(rawPhone);
+        const displayPhone = formatPhoneDisplay(rawPhone);
+        if (!normPhone || normPhone.replace(/\D/g, '').length < 7) {
+          return sendJson(res, 200, { valid: false, normPhone: '', displayPhone: '' });
+        }
+        const registeredUser = db.prepare('SELECT id, username, display_name, phone, avatar_color, is_registered FROM users WHERE phone_normalized = ? AND is_registered = 1 LIMIT 1').get(normPhone);
+        return sendJson(res, 200, {
+          valid: true,
+          normPhone,
+          displayPhone,
+          isRegistered: Boolean(registeredUser),
+          user: registeredUser
+            ? {
+                id: registeredUser.id,
+                display_name: registeredUser.display_name,
+                phone: registeredUser.phone,
+                online: isUserOnline(registeredUser.id)
+              }
+            : null
+        });
       }
 
       // --- TELEFON REHBERİ KAYIT, SENKRONİZASYON VE SMS/WHATSAPP DAVET UÇ NOKTALARI ---

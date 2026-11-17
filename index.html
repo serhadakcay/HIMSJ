@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- BUILD_VER: 600 -->
+<!-- BUILD_VER: 700 -->
 <html lang="tr" data-theme="dark">
 <head>
   <meta charset="UTF-8" />
@@ -12,7 +12,7 @@
   <link rel="manifest" href="/manifest.json" />
   <link rel="icon" type="image/svg+xml" href="/icon.svg" />
   <link rel="apple-touch-icon" href="/icon.svg" />
-  <link rel="stylesheet" href="/style.css?v=6.0" />
+  <link rel="stylesheet" href="/style.css?v=7.0" />
 </head>
 <body>
   <!-- Bildirim Toast Alanı -->
@@ -297,70 +297,72 @@
   <div id="contact-modal" class="modal-backdrop hidden">
     <div class="modal-card">
       <div class="modal-header">
-        <h3>📒 Cep Telefonu Rehberinden Kişi Ekle &amp; Davet Gönder</h3>
+        <h3>💬 Yeni Kişi / Sohbet Ekle &amp; Davet Gönder</h3>
         <button class="icon-btn" onclick="App.closeModal('contact-modal')">✕</button>
       </div>
       <div class="modal-body">
-        <!-- HTTPS Rehber İzni Uyarısı (Yalnızca HTTP üzerinden bağlanıldığında görünür) -->
-        <div id="https-contacts-hint" class="hidden" style="background:rgba(245, 158, 11, 0.15);border:1px solid rgba(245, 158, 11, 0.45);padding:10px 12px;border-radius:10px;font-size:12px;">
-          ⚠️ <strong>Doğrudan Rehber Erişimi:</strong> Telefon tarayıcıları doğrudan rehber seçimi için güvenli bağlantı (HTTPS) veya rehber dosyası/metni kullanır.
-          <button type="button" class="btn btn-primary btn-sm" style="margin-top:6px;width:100%;" onclick="App.switchToHttpsForContacts()">
-            🔒 Doğrudan Rehber İzni İçin Güvenli Bağlantıya (HTTPS) Geç
-          </button>
-        </div>
-
-        <!-- 1. Cep Telefonu Rehberinden Doğrudan Aktarma Butonları -->
-        <div style="background:var(--bg-header);padding:12px;border-radius:12px;">
-          <h4 style="margin-bottom:6px;color:var(--primary);">📱 1. Cep Telefonu Rehberinden Kişi Seç</h4>
-          <p style="font-size:12px;color:var(--text-muted);margin-bottom:10px;">
-            Telefon rehberinizden bir veya birden fazla kişi seçin ya da rehberden paylaşılan kişi kartını (`.vcf`) yükleyin:
-          </p>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
-            <button type="button" class="btn btn-primary btn-sm" onclick="App.importFromPhoneContactsApi(false)">
-              📱 Rehberden Kişi Seç
-            </button>
-            <label for="vcf-file-input" class="btn btn-secondary btn-sm" style="cursor:pointer;display:inline-flex;align-items:center;justify-content:center;margin:0;">
-              📂 Rehber / Kişi Kartı (.vcf) Seç
-            </label>
+        <!-- 1. WHATSAPP & TELEGRAM TARZI HIZLI KİŞİ EKLEME (EN GÜVENİLİR VE TAVSİYE EDİLEN YÖNTEM) -->
+        <form onsubmit="App.submitAddContact(event, 'auto')" style="background:var(--bg-header);padding:14px;border-radius:12px;display:flex;flex-direction:column;gap:10px;border:1px solid var(--border-color);">
+          <div style="display:flex;align-items:center;justify-content:space-between;">
+            <h4 style="color:var(--primary);margin:0;font-size:14.5px;">✨ 1. Numara ile Hızlı Ekle (WhatsApp &amp; Telegram Tarzı)</h4>
+            <span style="font-size:11px;background:rgba(16,185,129,0.18);color:#10b981;padding:2px 8px;border-radius:12px;font-weight:700;">Hemen Başlat</span>
           </div>
-          <button type="button" class="btn btn-secondary btn-block btn-sm" style="margin-top:6px;" onclick="App.importFromPhoneContactsApi(true)">
-            👥 Rehberden Birden Fazla Kişi Seç (Çoklu Seçim)
-          </button>
-        </div>
 
-        <!-- 2. Manuel Numara / Kişi Ekleme ve Anında SMS / WhatsApp Mesajı Gönderme -->
-        <form onsubmit="App.submitAddContact(event, 'auto')" style="background:var(--bg-header);padding:12px;border-radius:12px;display:flex;flex-direction:column;gap:8px;">
-          <h4 style="color:#38bdf8;">➕ 2. Numara ile Kişi Ekle &amp; SMS / WhatsApp Gönder</h4>
-          <label class="field-label">Kişi Adı Soyadı (İsteğe Bağlı)</label>
-          <input id="contact-name-input" type="text" class="input" placeholder="Örn: Mustafa Kaya (Boş bırakılırsa numara yazılır)" />
+          <div>
+            <label class="field-label" style="margin-bottom:4px;display:block;">Kişi Adı Soyadı</label>
+            <input id="contact-name-input" type="text" class="input" placeholder="Örn: Cem ORTİ (veya boş bırakabilirsiniz)" />
+          </div>
 
-          <label class="field-label">Cep Telefonu Numarası</label>
-          <input id="contact-phone-input" type="tel" class="input" placeholder="Örn: 0532 444 55 66" required />
+          <div>
+            <label class="field-label" style="margin-bottom:4px;display:block;">Cep Telefonu Numarası</label>
+            <input id="contact-phone-input" type="tel" class="input" placeholder="Örn: 0542 383 26 63" oninput="App.onContactPhoneInput(this.value)" required />
+            <!-- Canlı Numara Sorgu Durum Rozeti -->
+            <div id="contact-lookup-status" style="margin-top:6px;font-size:12px;display:none;"></div>
+          </div>
 
           <div style="font-size:11.5px;color:var(--text-muted);background:var(--bg-app);padding:8px 10px;border-radius:8px;">
-            📩 <strong>Gönderilecek Mesaj:</strong><br />
+            📩 <strong>Otomatik Bilgilendirme Mesajı:</strong><br />
             <em>"(............ Bu numaraları kullanıcı sizi programı kullanmak için ekledi)"</em>
           </div>
 
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:4px;">
-            <button type="button" class="btn btn-primary btn-sm" style="background:#16a34a;" onclick="App.submitAddContact(event, 'whatsapp')">
-              🟢 Kaydet &amp; WhatsApp'tan At
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:2px;">
+            <button type="button" class="btn btn-primary btn-sm" style="background:#16a34a;justify-content:center;" onclick="App.submitAddContact(event, 'whatsapp')">
+              🟢 WhatsApp'tan Gönder
             </button>
-            <button type="button" class="btn btn-secondary btn-sm" style="border-color:#38bdf8;color:#38bdf8;" onclick="App.submitAddContact(event, 'sms')">
-              📩 Kaydet &amp; SMS Gönder
+            <button type="button" class="btn btn-secondary btn-sm" style="border-color:#38bdf8;color:#38bdf8;justify-content:center;" onclick="App.submitAddContact(event, 'sms')">
+              📩 SMS ile Gönder
             </button>
           </div>
-          <button type="submit" class="btn btn-primary btn-block btn-sm">
-            💾 Rehbere Kaydet ve Davet Seçeneklerini Aç
+          <button type="submit" class="btn btn-primary btn-block btn-sm" style="justify-content:center;padding:10px;font-weight:700;">
+            💾 Rehbere Kaydet &amp; Sohbeti Başlat
           </button>
         </form>
 
-        <!-- 3. Toplu Kişi / Numara Yapıştırarak Ekleme (iPhone & Tüm Cihazlar İçin) -->
-        <div style="background:var(--bg-header);padding:12px;border-radius:12px;display:flex;flex-direction:column;gap:8px;">
-          <h4 style="font-size:13.5px;">📋 3. Rehberden Kopyalanan Kişileri / Numaraları Yapıştır</h4>
-          <textarea id="bulk-contacts-input" class="input" rows="2" placeholder="Her satıra bir kişi veya numara yazın/yapıştırın:&#10;Ali Yılmaz 0532 111 22 33&#10;0544 222 33 44"></textarea>
+        <!-- 2. CEP TELEFONU REHBERİNDEN AKTAR (MOBİL CHROME CONTACT PICKER & VCF) -->
+        <div style="background:var(--bg-header);padding:14px;border-radius:12px;border:1px solid var(--border-color);display:flex;flex-direction:column;gap:8px;">
+          <h4 style="margin:0;font-size:14px;color:#38bdf8;">📱 2. Telefon Rehberinden Kişi Aktar</h4>
+          <p style="font-size:11.5px;color:var(--text-muted);margin:0;line-height:1.45;">
+            💡 <em>İpucu: Android rehberinde birden fazla numarası olan kişilerde (örn: + 2 tane daha), kişinin üzerine dokunup numarayı seçtikten sonra sağ üstteki 'Bitti' butonuna basın.</em>
+          </p>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:4px;">
+            <button type="button" class="btn btn-primary btn-sm" onclick="App.importFromPhoneContactsApi(false)">
+              📱 Telefondan Kişi Seç
+            </button>
+            <label for="vcf-file-input" class="btn btn-secondary btn-sm" style="cursor:pointer;display:inline-flex;align-items:center;justify-content:center;margin:0;">
+              📂 Rehber (.vcf) Dosyası
+            </label>
+          </div>
+          <button type="button" class="btn btn-secondary btn-block btn-sm" onclick="App.importFromPhoneContactsApi(true)">
+            👥 Rehberden Birden Fazla Kişi Seç (Toplu)
+          </button>
+        </div>
+
+        <!-- 3. TOPLU NUMARA VEYA İSİM METNİ YAPIŞTIR -->
+        <div style="background:var(--bg-header);padding:14px;border-radius:12px;border:1px solid var(--border-color);display:flex;flex-direction:column;gap:8px;">
+          <h4 style="margin:0;font-size:13.5px;">📋 3. Numaraları Metin Olarak Yapıştır</h4>
+          <textarea id="bulk-contacts-input" class="input" rows="2" placeholder="Her satıra bir kişi veya numara yazın:&#10;Cem ORTİ 0542 383 26 63&#10;0532 111 22 33"></textarea>
           <button type="button" class="btn btn-secondary btn-sm" onclick="App.submitBulkTextContacts()">
-            📥 Yapıştırılan Kişileri Rehbere Ekle &amp; SMS/WhatsApp Gönder
+            📥 Yapıştırılanları Rehbere Ekle
           </button>
         </div>
       </div>
@@ -674,7 +676,10 @@
     </div>
   </div>
 
-  <script src="/crypto-e2ee.js?v=6.0"></script>
-  <script src="/app.js?v=6.0"></script>
+  <!-- WhatsApp & Telegram Tarzı Hızlı Yeni Sohbet / Kişi Ekle Yüzen Butonu (FAB) -->
+  <button id="global-fab-btn" class="fab-btn" onclick="App.openContactModal()" title="Yeni Sohbet Başlat / Kişi Ekle">💬+</button>
+
+  <script src="/crypto-e2ee.js?v=7.0"></script>
+  <script src="/app.js?v=7.0"></script>
 </body>
 </html>
