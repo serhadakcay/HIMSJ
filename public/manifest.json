@@ -1,0 +1,9 @@
+{
+  "name": "NexusChat E2EE",
+  "short_name": "NexusChat",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0b141a",
+  "theme_color": "#00a884",
+  "icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml" }]
+}

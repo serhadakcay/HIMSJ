@@ -1,0 +1,12 @@
+{
+  "name": "nexuschat-whatsapp-e2ee",
+  "version": "3.0.0",
+  "description": "GitHub & Render uyumlu, sıfır bağımlılıklı, uçtan uca şifreli (E2EE), telefon rehberi, SMS/WhatsApp davet, WebRTC sesli/görüntülü arama ve kapalıyken VAPID Web Push uyandırma destekli mesajlaşma uygulaması",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  }
+}

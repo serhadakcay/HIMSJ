@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#0b141a" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <title>NexusChat — Uçtan Uca Şifreli Mesajlaşma ve Görüntülü Arama</title>
+  <link rel="manifest" href="/manifest.json" />
+  <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+  <style>
+    :root {
+      --bg: #0b141a; --panel: #111b21; --header: #202c33; --input: #2a3942;
+      --out: #005c4b; --in: #202c33; --text: #e9edef; --muted: #8696a0;
+      --accent: #00a884; --danger: #ef4444; --border: #222d34;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    body { background: var(--bg); color: var(--text); height: 100dvh; display: flex; flex-direction: column; overflow: hidden; }
+    .hidden { display: none !important; }
+
+    /* Giriş & Kayıt Kartı */
+    #authScreen { margin: auto; width: 92%; max-width: 420px; background: var(--panel); padding: 26px; border-radius: 16px; border: 1px solid var(--border); box-shadow: 0 12px 32px rgba(0,0,0,0.5); }
+    #authScreen h1 { color: var(--accent); font-size: 22px; margin-bottom: 6px; }
+    #authScreen p { color: var(--muted); font-size: 13px; margin-bottom: 16px; }
+    .tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; background: var(--bg); padding: 4px; border-radius: 10px; margin-bottom: 14px; }
+    .tab { padding: 9px; border: none; border-radius: 8px; background: transparent; color: var(--muted); font-weight: 700; cursor: pointer; }
+    .tab.active { background: var(--header); color: var(--text); }
+    input, select, button { width: 100%; padding: 12px 14px; border-radius: 10px; border: 1px solid var(--border); background: var(--input); color: var(--text); font-size: 15px; margin-bottom: 10px; outline: none; }
+    button { background: var(--accent); color: #0b141a; font-weight: 700; border: none; cursor: pointer; }
+    .btn-sec { background: var(--input); color: var(--text); border: 1px solid var(--border); }
+    .btn-sm { width: auto; padding: 7px 12px; font-size: 12.5px; margin: 0; }
+
+    /* Ana Ekran */
+    #appScreen { display: flex; flex: 1; height: 100%; overflow: hidden; }
+    .sidebar { width: 340px; background: var(--panel); border-right: 1px solid var(--border); display: flex; flex-direction: column; }
+    .top-bar { padding: 12px 14px; background: var(--header); display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); gap: 6px; }
+    .push-banner { background: rgba(0,168,132,0.16); padding: 8px 12px; font-size: 12px; display: flex; justify-content: space-between; align-items: center; gap: 8px; border-bottom: 1px solid var(--border); }
+    .contact-list { flex: 1; overflow-y: auto; }
+    .contact-item { padding: 12px 14px; border-bottom: 1px solid var(--border); cursor: pointer; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .contact-item:hover, .contact-item.active { background: var(--input); }
+    .avatar { width: 42px; height: 42px; border-radius: 50%; background: var(--accent); color: #0b141a; font-weight: 800; display: flex; align-items: center; justify-content: center; flex-shrink: 0; position: relative; }
+    .dot { width: 11px; height: 11px; border-radius: 50%; position: absolute; right: 0; bottom: 0; border: 2px solid var(--panel); }
+    .dot.on { background: #22c55e; }
+    .dot.off { background: #ef4444; }
+
+    .chat-pane { flex: 1; display: flex; flex-direction: column; background: var(--bg); }
+    .chat-head { padding: 10px 14px; background: var(--header); display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--border); gap: 8px; }
+    .back-btn { display: none; width: auto; margin: 0 8px 0 0; padding: 6px 10px; background: var(--input); color: var(--text); }
+    .e2ee-bar { background: #182229; color: var(--accent); font-size: 11.5px; text-align: center; padding: 5px; border-bottom: 1px solid var(--border); }
+    .messages { flex: 1; padding: 14px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+    .msg { max-width: 78%; padding: 9px 13px; border-radius: 12px; font-size: 14.5px; line-height: 1.4; word-break: break-word; }
+    .msg.out { align-self: flex-end; background: var(--out); border-top-right-radius: 2px; }
+    .msg.in { align-self: flex-start; background: var(--in); border-top-left-radius: 2px; }
+    .msg img { max-width: 240px; border-radius: 8px; display: block; margin-bottom: 4px; }
+    .msg-meta { font-size: 10px; color: var(--muted); text-align: right; margin-top: 4px; }
+
+    .composer { padding: 10px; background: var(--header); display: flex; gap: 8px; align-items: center; }
+    .composer input[type="text"] { margin: 0; flex: 1; }
+    .composer select, .composer button { width: auto; margin: 0; }
+
+    /* Modallar */
+    .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,0.72); display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 100; }
+    .modal { width: 100%; max-width: 440px; background: var(--panel); border-radius: 16px; padding: 20px; border: 1px solid var(--border); }
+    .modal h3 { margin-bottom: 12px; color: var(--accent); }
+
+    /* Tam Ekran Sesli / Görüntülü Arama Ekranı */
+    #callScreen { position: fixed; inset: 0; background: #070b0e; z-index: 200; display: flex; flex-direction: column; justify-content: space-between; padding: 24px; text-align: center; }
+    .video-box { flex: 1; position: relative; border-radius: 16px; overflow: hidden; background: #111b21; margin: 16px 0; display: flex; align-items: center; justify-content: center; }
+    #remoteVideo { width: 100%; height: 100%; object-fit: cover; }
+    #localVideo { position: absolute; right: 14px; bottom: 14px; width: 120px; height: 160px; border-radius: 12px; object-fit: cover; border: 2px solid var(--accent); background: #000; }
+    .call-actions { display: flex; justify-content: center; gap: 14px; flex-wrap: wrap; }
+    .call-btn { width: auto; padding: 14px 22px; border-radius: 30px; font-size: 15px; }
+    .btn-red { background: var(--danger); color: #fff; }
+
+    @media (max-width: 740px) {
+      .sidebar { width: 100%; }
+      .chat-pane { display: none; width: 100%; }
+      #appScreen.mobile-chat .sidebar { display: none; }
+      #appScreen.mobile-chat .chat-pane { display: flex; }
+      .back-btn { display: inline-block; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- 1. Şifreli Giriş & Kayıt Ekranı -->
+  <div id="authScreen">
+    <h1>🔒 NexusChat E2EE</h1>
+    <p>Uçtan uca şifreli mesajlaşma, telefon rehberi eşleştirme ve görüntülü arama.</p>
+    <div class="tabs">
+      <button class="tab active" id="tabLogin">Giriş Yap</button>
+      <button class="tab" id="tabReg">Kayıt Ol</button>
+    </div>
+
+    <form id="loginForm">
+      <input type="tel" id="loginPhone" placeholder="Cep Telefonu (Örn: 0532 111 22 33)" required />
+      <input type="password" id="loginPass" placeholder="Şifreniz" required />
+      <button type="submit">🔒 Şifre ile Giriş Yap</button>
+    </form>
+
+    <form id="regForm" class="hidden">
+      <input type="text" id="regName" placeholder="Adınız Soyadınız (Örn: Serhad Akçay)" required />
+      <input type="tel" id="regPhone" placeholder="Cep Telefonu (Örn: 0532 111 22 33)" required />
+      <input type="password" id="regPass" placeholder="Şifre Belirleyin (En az 4 karakter)" required />
+      <button type="submit">✨ Hesap Oluştur ve Anahtar Üret</button>
+    </form>
+  </div>
+
+  <!-- 2. Ana Sohbet Uygulaması -->
+  <div id="appScreen" class="hidden">
+    <aside class="sidebar">
+      <div class="top-bar">
+        <div>
+          <strong id="myNameLabel">Ben</strong>
+          <div style="font-size:11px;color:var(--muted);" id="myPhoneLabel"></div>
+        </div>
+        <div style="display:flex;gap:6px;">
+          <button class="btn-sm" id="openAddContactBtn">➕ Kişi Ekle</button>
+          <button class="btn-sm btn-sec" id="logoutBtn" title="Çıkış">🚪</button>
+        </div>
+      </div>
+
+      <div class="push-banner" id="pushBanner">
+        <span>🔔 Kapalıyken mesaj ve arama bildirimi al</span>
+        <button class="btn-sm" id="enablePushBtn">İzin Ver</button>
+      </div>
+
+      <div class="contact-list" id="contactList"></div>
+    </aside>
+
+    <section class="chat-pane">
+      <div class="chat-head">
+        <div style="display:flex;align-items:center;min-width:0;">
+          <button class="back-btn" id="backBtn">←</button>
+          <div style="min-width:0;">
+            <strong id="peerNameLabel">Bir kişi seçin</strong>
+            <div style="font-size:11px;color:var(--muted);" id="peerStatusLabel">Rehberden kişi seçin veya ekleyin</div>
+          </div>
+        </div>
+        <div style="display:flex;gap:6px;flex-shrink:0;" id="chatHeaderActions" class="hidden">
+          <button class="btn-sm btn-sec" id="waInviteBtn" style="background:#16a34a;color:#fff;" title="WhatsApp Davet">🟢 WA</button>
+          <button class="btn-sm btn-sec" id="smsInviteBtn" title="SMS Davet">📩 SMS</button>
+          <button class="btn-sm btn-sec" id="audioCallBtn" title="Sesli Arama">📞</button>
+          <button class="btn-sm" id="videoCallBtn" title="Görüntülü Arama">📹</button>
+        </div>
+      </div>
+
+      <div class="e2ee-bar">🛡️ ECDH P-256 + HKDF Ratchet + AES-256-GCM Uçtan Uca Şifreli</div>
+      <div class="messages" id="msgFeed"></div>
+
+      <div class="composer">
+        <input type="file" id="fileInput" class="hidden" />
+        <button class="btn-sec btn-sm" id="attachBtn" disabled>📎</button>
+        <select id="ttlSelect" class="btn-sm">
+          <option value="0">Kalıcı</option>
+          <option value="5000">🔥 5 sn</option>
+          <option value="15000">🔥 15 sn</option>
+        </select>
+        <input type="text" id="msgInput" placeholder="Şifreli mesaj yazın..." disabled />
+        <button class="btn-sm" id="sendBtn" disabled>Gönder</button>
+      </div>
+    </section>
+  </div>
+
+  <!-- 3. Telefon Rehberi / Numara ile Kişi Ekleme Modalı -->
+  <div id="addContactModal" class="modal-bg hidden">
+    <div class="modal">
+      <h3>📒 Rehberden veya Numaradan Kişi Ekle</h3>
+      <button type="button" id="pickFromPhoneBtn" style="background:#0284c7;color:#fff;">📱 Telefon Rehberinden Kişi Seç</button>
+      <div style="text-align:center;font-size:12px;color:var(--muted);margin:6px 0;">— veya numarayı elle girin —</div>
+      <form id="manualContactForm">
+        <input type="text" id="newContactName" placeholder="Kişi Adı (Örn: Ahmet Yılmaz)" required />
+        <input type="tel" id="newContactPhone" placeholder="Cep Telefonu (Örn: 0532 111 22 33)" required />
+        <div style="display:flex;gap:8px;">
+          <button type="button" class="btn-sec" id="closeAddModalBtn">İptal</button>
+          <button type="submit">Kaydet & Davet Bağlantısı Oluştur</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- 4. SMS & WhatsApp Davet Gönderme Modalı -->
+  <div id="inviteModal" class="modal-bg hidden">
+    <div class="modal">
+      <h3>📲 Kişiyi Programa Davet Et</h3>
+      <p style="font-size:13px;color:var(--muted);margin-bottom:10px;" id="invitePreviewText"></p>
+      <div style="display:flex;gap:8px;margin-bottom:10px;">
+        <a id="inviteWaLink" target="_blank" style="flex:1;text-align:center;padding:12px;background:#16a34a;color:#fff;border-radius:10px;text-decoration:none;font-weight:700;">🟢 WhatsApp'tan Gönder</a>
+        <a id="inviteSmsLink" style="flex:1;text-align:center;padding:12px;background:#0284c7;color:#fff;border-radius:10px;text-decoration:none;font-weight:700;">📩 SMS ile Gönder</a>
+      </div>
+      <button type="button" class="btn-sec" id="closeInviteModalBtn">Kapat</button>
+    </div>
+  </div>
+
+  <!-- 5. Tam Ekran Sesli / Görüntülü Arama Ekranı -->
+  <div id="callScreen" class="hidden">
+    <div>
+      <span style="background:rgba(0,168,132,0.2);color:var(--accent);padding:4px 12px;border-radius:16px;font-size:12px;">🔒 Uçtan Uca Şifreli WebRTC Arama</span>
+      <h2 id="callPeerTitle" style="margin-top:12px;">Aranıyor...</h2>
+      <p id="callStatusText" style="color:var(--muted);font-size:14px;margin-top:4px;">Çalıyor...</p>
+    </div>
+
+    <div class="video-box">
+      <video id="remoteVideo" autoplay playsinline></video>
+      <video id="localVideo" autoplay playsinline muted></video>
+    </div>
+
+    <div class="call-actions" id="incomingCallControls" class="hidden">
+      <button class="call-btn" id="acceptCallBtn">📞 Cevapla</button>
+      <button class="call-btn btn-red" id="rejectCallBtn">❌ Reddet</button>
+    </div>
+
+    <div class="call-actions" id="activeCallControls">
+      <button class="call-btn btn-sec" id="toggleMicBtn">🎤 Mikrofon</button>
+      <button class="call-btn btn-sec" id="toggleCamBtn">📷 Kamera</button>
+      <button class="call-btn btn-red" id="hangupCallBtn">📞 Kapat</button>
+    </div>
+  </div>
+
+  <script src="crypto.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

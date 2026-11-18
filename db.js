@@ -1,0 +1,159 @@
+/**
+ * Sıfır Bağımlılıklı Yerleşik SQLite Veritabanı Katmanı (Node.js node:sqlite)
+ * - Telefon numarası normalizasyonu ve otomatik hesap eşleştirme
+ * - Kullanıcı hesapları, şifreli parola doğrulama (scrypt) ve E2EE açık anahtar dizini
+ * - Telefon rehberi kayıtları ve SMS / WhatsApp davet bağlantısı üretimi
+ * - Sıfır-Bilgi (Zero-Knowledge) şifreli mesaj deposu (Sunucu plaintext saklamaz)
+ * - Kapalıyken bildirim ve arama uyandırma için Web Push (VAPID) abonelikleri
+ */
+
+const fs = require('node:fs');
+const path = require('node:path');
+const crypto = require('node:crypto');
+const { DatabaseSync } = require('node:sqlite');
+
+const DATA_DIR = path.join(__dirname, 'data');
+if (!fs.existsSync(DATA_DIR)) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+}
+
+const DB_PATH = path.join(DATA_DIR, 'nexuschat.sqlite');
+const db = new DatabaseSync(DB_PATH);
+
+db.exec(`
+  PRAGMA journal_mode = WAL;
+  PRAGMA foreign_keys = ON;
+  PRAGMA synchronous = NORMAL;
+
+  CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    display_name TEXT NOT NULL,
+    phone TEXT NOT NULL,
+    phone_normalized TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,
+    password_salt TEXT NOT NULL,
+    is_registered INTEGER DEFAULT 1,
+    public_key_jwk TEXT DEFAULT '',
+    key_fingerprint TEXT DEFAULT '',
+    avatar_color TEXT DEFAULT '#00a884',
+    last_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS sessions (
+    token TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    device_name TEXT DEFAULT 'Cihaz',
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS contacts (
+    user_id TEXT NOT NULL,
+    contact_user_id TEXT NOT NULL,
+    contact_name TEXT NOT NULL,
+    contact_phone TEXT NOT NULL,
+    contact_phone_normalized TEXT NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (user_id, contact_user_id),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (contact_user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS messages (
+    id TEXT PRIMARY KEY,
+    sender_id TEXT NOT NULL,
+    recipient_id TEXT NOT NULL,
+    msg_type TEXT DEFAULT 'text',
+    ciphertext TEXT NOT NULL,
+    iv TEXT NOT NULL,
+    msg_num INTEGER DEFAULT 0,
+    sender_public_key_jwk TEXT DEFAULT '',
+    ttl_ms INTEGER DEFAULT 0,
+    status TEXT DEFAULT 'sent',
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (sender_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (recipient_id) REFERENCES users(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS push_subscriptions (
+    endpoint TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    p256dh TEXT NOT NULL,
+    auth TEXT NOT NULL,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
+`);
+
+function normalizePhone(rawPhone) {
+  if (!rawPhone) return '';
+  let digits = String(rawPhone).replace(/\D/g, '');
+  if (!digits) return '';
+  if (digits.startsWith('00')) digits = digits.slice(2);
+  if (digits.length === 10 && !digits.startsWith('90')) digits = '90' + digits;
+  else if (digits.length === 11 && digits.startsWith('0')) digits = '90' + digits.slice(1);
+  else if (digits.length === 13 && digits.startsWith('900')) digits = '90' + digits.slice(3);
+  return '+' + digits;
+}
+
+function formatPhoneDisplay(rawPhone) {
+  const norm = normalizePhone(rawPhone);
+  if (/^\+90\d{10}$/.test(norm)) {
+    return `${norm.slice(0, 3)} ${norm.slice(3, 6)} ${norm.slice(6, 9)} ${norm.slice(9, 11)} ${norm.slice(11, 13)}`;
+  }
+  return norm || String(rawPhone || '').trim();
+}
+
+function hashPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
+  const hash = crypto.scryptSync(String(password), salt, 64).toString('hex');
+  return { hash, salt };
+}
+
+function verifyPassword(password, hash, salt) {
+  try {
+    const computed = crypto.scryptSync(String(password), salt, 64).toString('hex');
+    return crypto.timingSafeEqual(Buffer.from(computed, 'hex'), Buffer.from(hash, 'hex'));
+  } catch {
+    return false;
+  }
+}
+
+function generateFingerprint(inputStr) {
+  const digest = crypto.createHash('sha256').update(String(inputStr || '')).digest();
+  const blocks = [];
+  for (let i = 0; i < 10; i++) {
+    const num = digest.readUInt16BE(i * 2) % 100000;
+    blocks.push(String(num).padStart(5, '0'));
+  }
+  return blocks.join(' ');
+}
+
+function buildInviteLinks({ targetPhone, targetName, senderName, senderPhone, appUrl }) {
+  const norm = normalizePhone(targetPhone);
+  const displayPhone = formatPhoneDisplay(targetPhone || norm);
+  const waDigits = norm.replace(/\D/g, '');
+  const senderLabel = senderPhone ? `${senderName} (${formatPhoneDisplay(senderPhone)})` : senderName;
+  const urlPart = appUrl ? ` Uygulama adresi: ${appUrl}` : '';
+  const text = `${senderLabel} sizi NexusChat E2EE güvenli mesajlaşma ve görüntülü arama programını kullanmaya davet ediyor.${urlPart}`;
+  const encoded = encodeURIComponent(text);
+
+  return {
+    phone: displayPhone,
+    phoneNormalized: norm,
+    name: targetName || displayPhone,
+    inviteText: text,
+    whatsappUrl: waDigits ? `https://wa.me/${waDigits}?text=${encoded}` : `https://wa.me/?text=${encoded}`,
+    smsUrl: norm ? `sms:${norm}?body=${encoded}` : `sms:?body=${encoded}`
+  };
+}
+
+module.exports = {
+  db,
+  normalizePhone,
+  formatPhoneDisplay,
+  hashPassword,
+  verifyPassword,
+  generateFingerprint,
+  buildInviteLinks
+};
