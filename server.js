@@ -21,6 +21,7 @@ const PUBLIC_DIR = path.join(__dirname, 'public');
 const CERTS_DIR = path.join(__dirname, 'certs');
 const vapidKeys = ensureVapidKeys(CERTS_DIR);
 
+// userId -> Set<{ socket, deviceType, isForeground }>
 const onlineSockets = new Map();
 const activeCalls = new Map();
 
@@ -47,10 +48,16 @@ function sendWs(socket, obj) {
   } catch {}
 }
 
-function sendToUser(userId, obj) {
+function sendToUser(userId, obj, options = {}) {
   const set = onlineSockets.get(userId);
   if (!set) return;
-  for (const sock of set) sendWs(sock, obj);
+  for (const client of set) {
+    // Eğer hedef masaüstü (PC) cihazı arka plandaysa veya sekme gizliyse arama/bildirim gönderme
+    if (options.skipHiddenDesktop && client.deviceType === 'desktop' && !client.isForeground) {
+      continue;
+    }
+    sendWs(client.socket, obj);
+  }
 }
 
 function isUserOnline(userId) {
@@ -61,13 +68,21 @@ function isUserOnline(userId) {
 function broadcastPresence(userId, online) {
   db.prepare('UPDATE users SET last_seen_at = CURRENT_TIMESTAMP WHERE id = ?').run(userId);
   for (const set of onlineSockets.values()) {
-    for (const sock of set) sendWs(sock, { type: 'PRESENCE', userId, online });
+    for (const client of set) sendWs(client.socket, { type: 'PRESENCE', userId, online });
   }
 }
 
 async function triggerPushToUser(userId, payloadObj) {
-  const subs = db.prepare('SELECT endpoint, p256dh, auth FROM push_subscriptions WHERE user_id = ?').all(userId);
+  const set = onlineSockets.get(userId) || new Set();
+  const hasForegroundDesktop = Array.from(set).some((c) => c.deviceType === 'desktop' && c.isForeground);
+
+  // Yalnızca mobil cihaz aboneliklerine her zaman push gönder; masaüstü (desktop) aboneliklerine
+  // SADECE bilgisayar tarayıcısında sekme aktif olarak açıksa push gönder (bilgisayar kapalı/arkadayken bildirim düşmez!)
+  const subs = db.prepare('SELECT endpoint, device_type, p256dh, auth FROM push_subscriptions WHERE user_id = ?').all(userId);
   for (const s of subs) {
+    if (s.device_type === 'desktop' && !hasForegroundDesktop) {
+      continue;
+    }
     const res = await sendWebPush(
       { endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } },
       payloadObj,
@@ -108,7 +123,7 @@ function getAuthUser(req) {
   const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
   if (!token) return null;
   return db.prepare(`
-    SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?
+    SELECT u.*, s.device_type as session_device_type FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?
   `).get(token) || null;
 }
 
@@ -172,6 +187,7 @@ const server = http.createServer(async (req, res) => {
       const displayPhone = formatPhoneDisplay(body.phone);
       const password = String(body.password || '');
       const publicKeyJwk = String(body.publicKeyJwk || '');
+      const deviceType = body.deviceType === 'desktop' ? 'desktop' : 'mobile';
 
       if (displayName.length < 2) return sendJson(res, 400, { error: 'Ad Soyad en az 2 karakter olmalıdır.' });
       if (normPhone.length < 7) return sendJson(res, 400, { error: 'Geçerli bir cep telefonu numarası girin.' });
@@ -207,7 +223,7 @@ const server = http.createServer(async (req, res) => {
       integratePhoneContacts(userId, normPhone, displayName, displayPhone);
 
       const token = crypto.randomBytes(32).toString('hex');
-      db.prepare('INSERT INTO sessions (token, user_id, device_name) VALUES (?, ?, ?)').run(token, userId, 'Cihaz');
+      db.prepare('INSERT INTO sessions (token, user_id, device_name, device_type) VALUES (?, ?, ?, ?)').run(token, userId, deviceType === 'desktop' ? 'Bilgisayar' : 'Cep Telefonu', deviceType);
       const user = db.prepare('SELECT id, display_name, phone, phone_normalized, public_key_jwk, key_fingerprint, avatar_color FROM users WHERE id = ?').get(userId);
       return sendJson(res, 201, { token, user });
     }
@@ -218,6 +234,7 @@ const server = http.createServer(async (req, res) => {
       const normPhone = normalizePhone(body.phone);
       const password = String(body.password || '');
       const publicKeyJwk = String(body.publicKeyJwk || '');
+      const deviceType = body.deviceType === 'desktop' ? 'desktop' : 'mobile';
 
       const userRow = db.prepare('SELECT * FROM users WHERE phone_normalized = ? AND is_registered = 1').get(normPhone);
       if (!userRow) {
@@ -235,7 +252,7 @@ const server = http.createServer(async (req, res) => {
       }
 
       const token = crypto.randomBytes(32).toString('hex');
-      db.prepare('INSERT INTO sessions (token, user_id, device_name) VALUES (?, ?, ?)').run(token, userRow.id, 'Cihaz');
+      db.prepare('INSERT INTO sessions (token, user_id, device_name, device_type) VALUES (?, ?, ?, ?)').run(token, userRow.id, deviceType === 'desktop' ? 'Bilgisayar' : 'Cep Telefonu', deviceType);
 
       return sendJson(res, 200, {
         token,
@@ -273,12 +290,23 @@ const server = http.createServer(async (req, res) => {
       if (pathname === '/api/push/subscribe' && req.method === 'POST') {
         const body = await readJsonBody(req);
         const sub = body.subscription;
+        const deviceType = body.deviceType === 'desktop' ? 'desktop' : 'mobile';
         if (sub && sub.endpoint && sub.keys) {
           db.prepare(`
-            INSERT INTO push_subscriptions (endpoint, user_id, p256dh, auth, updated_at)
-            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-            ON CONFLICT(endpoint) DO UPDATE SET user_id = excluded.user_id, p256dh = excluded.p256dh, auth = excluded.auth, updated_at = CURRENT_TIMESTAMP
-          `).run(sub.endpoint, me.id, sub.keys.p256dh, sub.keys.auth);
+            INSERT INTO push_subscriptions (endpoint, user_id, device_type, p256dh, auth, updated_at)
+            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(endpoint) DO UPDATE SET user_id = excluded.user_id, device_type = excluded.device_type, p256dh = excluded.p256dh, auth = excluded.auth, updated_at = CURRENT_TIMESTAMP
+          `).run(sub.endpoint, me.id, deviceType, sub.keys.p256dh, sub.keys.auth);
+        }
+        return sendJson(res, 200, { ok: true });
+      }
+
+      if (pathname === '/api/push/unsubscribe' && req.method === 'POST') {
+        const body = await readJsonBody(req);
+        if (body.endpoint) {
+          db.prepare('DELETE FROM push_subscriptions WHERE endpoint = ?').run(body.endpoint);
+        } else if (body.deviceType === 'desktop') {
+          db.prepare("DELETE FROM push_subscriptions WHERE user_id = ? AND device_type = 'desktop'").run(me.id);
         }
         return sendJson(res, 200, { ok: true });
       }
@@ -335,7 +363,6 @@ const server = http.createServer(async (req, res) => {
                 contact_phone_normalized = excluded.contact_phone_normalized
             `).run(me.id, target.id, cleanName, dispPhone, norm);
 
-            // Karşı taraf kayıtlıysa onun rehberine de otomatik entegre et
             if (target.is_registered === 1) {
               db.prepare(`
                 INSERT INTO contacts (user_id, contact_user_id, contact_name, contact_phone, contact_phone_normalized)
@@ -370,7 +397,7 @@ const server = http.createServer(async (req, res) => {
           if (skippedSelf) {
             return sendJson(res, 400, { error: 'Kendi telefon numaranızı kişi olarak ekleyemezsiniz.' });
           }
-          return sendJson(res, 400, { error: 'Geçerli bir telefon numarası bulunamadı. Lütfen en az 7 haneli numara girin.' });
+          return sendJson(res, 400, { error: 'Geçerli bir telefon numarası bulunamadı.' });
         }
 
         return sendJson(res, 200, { ok: true, count: addedResults.length, contacts: addedResults });
@@ -485,10 +512,11 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-// WebSocket Sinyalizasyon
+// WebSocket Sinyalizasyon + CGNAT Medya Rölesi
 server.on('upgrade', (req, socket) => {
   const parsedUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   const token = parsedUrl.searchParams.get('token') || '';
+  const deviceType = parsedUrl.searchParams.get('deviceType') === 'desktop' ? 'desktop' : 'mobile';
   const me = db.prepare('SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?').get(token);
 
   if (!me) {
@@ -506,9 +534,10 @@ server.on('upgrade', (req, socket) => {
     `Sec-WebSocket-Accept: ${accept}\r\n\r\n`
   );
 
+  const clientEntry = { socket, deviceType, isForeground: true };
   if (!onlineSockets.has(me.id)) onlineSockets.set(me.id, new Set());
   const wasOffline = onlineSockets.get(me.id).size === 0;
-  onlineSockets.get(me.id).add(socket);
+  onlineSockets.get(me.id).add(clientEntry);
   if (wasOffline) broadcastPresence(me.id, true);
 
   let buffer = Buffer.alloc(0);
@@ -554,7 +583,9 @@ server.on('upgrade', (req, socket) => {
           const msg = JSON.parse(payload.toString('utf8'));
           if (msg.type === 'PING') {
             sendWs(socket, { type: 'PONG' });
-          } else if (['CALL_OFFER', 'CALL_ANSWER', 'ICE_CANDIDATE', 'CALL_REJECT', 'CALL_END'].includes(msg.type)) {
+          } else if (msg.type === 'VISIBILITY') {
+            clientEntry.isForeground = Boolean(msg.visible);
+          } else if (['CALL_OFFER', 'CALL_ANSWER', 'ICE_CANDIDATE', 'CALL_REJECT', 'CALL_END', 'CALL_MEDIA'].includes(msg.type)) {
             const callId = msg.callId || ('call_' + crypto.randomBytes(6).toString('hex'));
             const packet = { ...msg, callId, fromUserId: me.id, fromDisplayName: me.display_name };
 
@@ -570,6 +601,11 @@ server.on('upgrade', (req, socket) => {
                 createdAt: Date.now()
               });
 
+              // Arka planda veya gizli sekmede duran bilgisayara arama ekranı/bildirimi düşürme!
+              if (msg.targetUserId) {
+                sendToUser(msg.targetUserId, packet, { skipHiddenDesktop: true });
+              }
+
               triggerPushToUser(msg.targetUserId, {
                 type: 'incoming-call',
                 callId,
@@ -579,6 +615,7 @@ server.on('upgrade', (req, socket) => {
                 title: `📞 GELEN ARAMA: ${me.display_name}`,
                 body: msg.callType === 'video' ? '📹 Görüntülü Arama Geliyor — Yanıtlamak için dokunun' : '📞 Sesli Arama Geliyor — Yanıtlamak için dokunun'
               });
+              continue;
             } else if (msg.type === 'ICE_CANDIDATE' && msg.candidate) {
               for (const c of activeCalls.values()) {
                 if (c.callerId === me.id) c.iceCandidates.push(msg.candidate);
@@ -597,7 +634,7 @@ server.on('upgrade', (req, socket) => {
   const cleanup = () => {
     const set = onlineSockets.get(me.id);
     if (set) {
-      set.delete(socket);
+      set.delete(clientEntry);
       if (set.size === 0) {
         onlineSockets.delete(me.id);
         broadcastPresence(me.id, false);
@@ -609,5 +646,5 @@ server.on('upgrade', (req, socket) => {
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 NexusChat v4 Sunucusu Çalışıyor -> Port: ${PORT}`);
+  console.log(`🚀 NexusChat v5 Sunucusu Çalışıyor -> Port: ${PORT}`);
 });

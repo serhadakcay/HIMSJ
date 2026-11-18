@@ -1,6 +1,5 @@
-# NexusChat v4 — Android, iOS ve Bilgisayar Uyumlu E2EE Mesajlaşma Uygulaması
+# NexusChat v5 Pro — Çözülen Sorunlar ve Kullanım
 
-## Düzeltilen ve Eklenen Özellikler
-1. **Yeni Kullanıcı & Rehber Ekleme Düzeltildi:** Hata mesajları artık sessizce yutulmaz; kendi numaranızı girdiğinizde veya geçersiz formatta uyarı verir. Android rehber seçici (`Contact Picker API`), iPhone/Android `.vcf` kişi kartı yükleme, manuel numara ekleme ve toplu numara yapıştırma desteklenir.
-2. **Android & iOS (iPhone) Kurulum Rehberi:** Uygulama içindeki **📲 Kur** butonunda hem Android (tek tıkla PWA yükleme) hem de iOS Safari (**Paylaş -> Ana Ekrana Ekle**) kurulum adımları ve `apple-touch-icon` / `manifest.json` yapılandırması eklendi.
-3. **Otomatik Başlatıcılar:** Windows için `BASLAT.bat`, macOS/Linux için `baslat.sh`.
+1. **Çoklu Numaralı Rehber Kişisi Seçimi (Resim 2):** Android rehberden birden fazla numarası olan bir kişi (ör. `Cem ORTİ + 2 tane daha`) seçilip **Bitti** dendiğinde artık numara seçim ekranı açılır; istediğiniz numarayı veya tüm numaraları seçip kaydedebilirsiniz. Ayrıca Android arka plandan dönerken ağ kopmalarına karşı `localStorage` kalıcı kuyruğu ile otomatik yeniden deneme eklendi.
+2. **Aramalarda Ses ve Görüntü Aktarımı:** STUN sunucularına ek olarak TURN sunucuları ve mobil operatör (4.5G/5G CGNAT) arkasında WebRTC UDP paketleri engellendiğinde bile ses ve kamera karelerini anında ileten WebSocket Medya Rölesi entegre edildi.
+3. **Bilgisayar Arka Plandayken Bildirim/Arama Düşmemesi:** İstemci cihaz tipi (`mobile` / `desktop`) ve sekme görünürlüğü (`visibilitychange`) sunucuya bildirilir; bilgisayar tarayıcısı kapalıyken veya arka plandayken arama ve push bildirimleri yalnızca cep telefonuna yönlendirilir.

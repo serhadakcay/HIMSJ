@@ -1,49 +1,65 @@
 const e2ee = new NexusE2EE();
+const isMobileDevice = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || '');
+const deviceType = isMobileDevice ? 'mobile' : 'desktop';
+
 let token = localStorage.getItem('nexus_token') || '';
 let me = null;
 let ws = null;
 let contacts = [];
 let activePeer = null;
 let deferredInstallPrompt = null;
+let pendingPhoneChoiceCb = null;
 
-// WebRTC Arama Durumu
+// WebRTC + CGNAT Medya Rölesi Durumu
 let pc = null;
 let localStream = null;
+let remoteStream = null;
 let activeCall = null;
 let incomingOffer = null;
 let pendingCandidates = [];
 let ringInterval = null;
+let isSpeakerOn = false;
+let callAudioCtx = null;
+let speakerGain = null;
+let nextPlayTime = 0;
+let wsAudioProc = null;
+let wsVideoTimer = null;
+let webrtcAudioActive = false;
+let webrtcVideoActive = false;
+let statsInterval = null;
+let lastAudioBytes = 0;
+let lastVideoBytes = 0;
 
-// Android / Masaüstü PWA Yükleme İstemini Yakala
 window.addEventListener('beforeinstallprompt', (e) => {
   e.preventDefault();
   deferredInstallPrompt = e;
 });
 
-document.getElementById('openInstallBtn').onclick = () => {
-  document.getElementById('installModal').classList.remove('hidden');
-};
-document.getElementById('openInstallFromAuthBtn').onclick = () => {
-  document.getElementById('installModal').classList.remove('hidden');
-};
-document.getElementById('closeInstallModalBtn').onclick = () => {
-  document.getElementById('installModal').classList.add('hidden');
-};
+document.getElementById('openInstallBtn').onclick = () => document.getElementById('installModal').classList.remove('hidden');
+document.getElementById('openInstallFromAuthBtn').onclick = () => document.getElementById('installModal').classList.remove('hidden');
+document.getElementById('closeInstallModalBtn').onclick = () => document.getElementById('installModal').classList.add('hidden');
 
 document.getElementById('androidDirectInstallBtn').onclick = async () => {
   if (deferredInstallPrompt) {
     deferredInstallPrompt.prompt();
     const res = await deferredInstallPrompt.userChoice;
-    if (res.outcome === 'accepted') {
-      document.getElementById('installModal').classList.add('hidden');
-    }
+    if (res.outcome === 'accepted') document.getElementById('installModal').classList.add('hidden');
     deferredInstallPrompt = null;
   } else {
     alert('Tarayıcınızın sağ üst köşesindeki ⋮ (Üç Nokta) menüsüne dokunup "Ana ekrana ekle" veya "Uygulamayı yükle" seçeneğine basın.');
   }
 };
 
-// Service Worker Kaydı
+// Bilgisayar sekmesi gizlendiğinde veya arka plana atıldığında sunucuya bildir (PC'ye gereksiz arama/bildirim düşmesini önler)
+document.addEventListener('visibilitychange', () => {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'VISIBILITY', visible: !document.hidden }));
+  }
+  if (!document.hidden && token) {
+    flushPendingContactImport();
+  }
+});
+
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/sw.js').catch(() => {});
   navigator.serviceWorker.addEventListener('message', async (ev) => {
@@ -76,7 +92,6 @@ async function api(url, method = 'GET', body = null) {
   return data;
 }
 
-// Giriş / Kayıt Sekmeleri
 document.getElementById('tabLogin').onclick = () => {
   document.getElementById('tabLogin').classList.add('active');
   document.getElementById('tabReg').classList.remove('active');
@@ -101,7 +116,7 @@ document.getElementById('regForm').onsubmit = async (e) => {
     const pubJwkStr = await e2ee.initForUser(norm);
 
     const data = await api('/api/auth/register', 'POST', {
-      displayName, phone, password, publicKeyJwk: pubJwkStr
+      displayName, phone, password, publicKeyJwk: pubJwkStr, deviceType
     });
     token = data.token;
     localStorage.setItem('nexus_token', token);
@@ -121,7 +136,7 @@ document.getElementById('loginForm').onsubmit = async (e) => {
     const pubJwkStr = await e2ee.initForUser(norm);
 
     const data = await api('/api/auth/login', 'POST', {
-      phone, password, publicKeyJwk: pubJwkStr
+      phone, password, publicKeyJwk: pubJwkStr, deviceType
     });
     token = data.token;
     localStorage.setItem('nexus_token', token);
@@ -132,7 +147,10 @@ document.getElementById('loginForm').onsubmit = async (e) => {
   }
 };
 
-document.getElementById('logoutBtn').onclick = () => {
+document.getElementById('logoutBtn').onclick = async () => {
+  if (deviceType === 'desktop') {
+    await api('/api/push/unsubscribe', 'POST', { deviceType: 'desktop' }).catch(() => {});
+  }
   localStorage.removeItem('nexus_token');
   location.reload();
 };
@@ -161,6 +179,7 @@ async function startApp() {
   }
 
   connectWebSocket();
+  await flushPendingContactImport();
   await loadContacts();
 
   const params = new URLSearchParams(location.search);
@@ -177,7 +196,7 @@ document.getElementById('enablePushBtn').onclick = async () => {
   if (perm === 'granted') {
     document.getElementById('pushBanner').classList.add('hidden');
     await registerWebPush();
-    alert('✅ Arka plan bildirimleri ve kapalıyken arama uyandırma aktif edildi!');
+    alert('✅ Bildirimler aktif edildi!');
   }
 };
 
@@ -202,15 +221,16 @@ async function registerWebPush() {
         applicationServerKey: urlB64ToUint8Array(publicKey)
       });
     }
-    await api('/api/push/subscribe', 'POST', { subscription: sub.toJSON() });
+    await api('/api/push/subscribe', 'POST', { subscription: sub.toJSON(), deviceType });
   } catch {}
 }
 
 function connectWebSocket() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  ws = new WebSocket(`${proto}//${location.host}/?token=${encodeURIComponent(token)}`);
+  ws = new WebSocket(`${proto}//${location.host}/?token=${encodeURIComponent(token)}&deviceType=${deviceType}`);
 
   ws.onopen = () => {
+    ws.send(JSON.stringify({ type: 'VISIBILITY', visible: !document.hidden }));
     setInterval(() => {
       if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'PING' }));
     }, 20000);
@@ -237,6 +257,8 @@ function connectWebSocket() {
         await loadContacts();
       }
     } else if (data.type === 'CALL_OFFER') {
+      // Bilgisayarda sekme arka plandaysa arama ekranı açma (sadece cep telefonunda çalsın)
+      if (deviceType === 'desktop' && document.hidden) return;
       incomingOffer = data;
       showIncomingCallScreen(data);
     } else if (data.type === 'CALL_ANSWER') {
@@ -247,19 +269,22 @@ function connectWebSocket() {
         for (const cand of pendingCandidates) await pc.addIceCandidate(new RTCIceCandidate(cand)).catch(() => {});
         pendingCandidates = [];
       }
+      startWsMediaRelay();
     } else if (data.type === 'ICE_CANDIDATE' && data.candidate) {
       if (pc && pc.remoteDescription) {
         await pc.addIceCandidate(new RTCIceCandidate(data.candidate)).catch(() => {});
       } else {
         pendingCandidates.push(data.candidate);
       }
+    } else if (data.type === 'CALL_MEDIA') {
+      handleIncomingWsMedia(data);
     } else if (data.type === 'CALL_REJECT' || data.type === 'CALL_END') {
       closeCallScreen();
     }
   };
 }
 
-// --- REHBER VE KİŞİ EKLEME (DÜZELTİLMİŞ ÇOKLU FORMAT) ---
+// --- REHBER VE ÇOKLU NUMARA SEÇİMİ (Resim 2'deki sorunun kesin çözümü) ---
 async function loadContacts() {
   const data = await api('/api/contacts');
   contacts = data.contacts || [];
@@ -294,93 +319,179 @@ function renderContacts() {
   }
 }
 
-document.getElementById('openAddContactBtn').onclick = () => {
-  document.getElementById('addContactModal').classList.remove('hidden');
-};
-document.getElementById('closeAddModalBtn').onclick = () => {
-  document.getElementById('addContactModal').classList.add('hidden');
+document.getElementById('openAddContactBtn').onclick = () => document.getElementById('addContactModal').classList.remove('hidden');
+document.getElementById('closeAddModalBtn').onclick = () => document.getElementById('addContactModal').classList.add('hidden');
+
+function cleanStringArray(val) {
+  if (!val) return [];
+  const arr = Array.isArray(val) ? val : Array.from(val);
+  return arr.map((item) => {
+    if (item && typeof item === 'object') {
+      return String(item.value || item.number || item.tel || item.display || item.name || '').trim();
+    }
+    return String(item || '').replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, '').trim();
+  }).filter(Boolean);
+}
+
+function showChoosePhoneModal(contactName, phoneNumbers, callback) {
+  pendingPhoneChoiceCb = callback;
+  document.getElementById('choosePhoneTitle').textContent = `📱 ${contactName} — Numara Seçin`;
+  document.getElementById('choosePhoneDesc').textContent = `"${contactName}" kişisinde ${phoneNumbers.length} numara bulundu. Hangisini eklemek istersiniz?`;
+
+  const listEl = document.getElementById('choosePhoneList');
+  listEl.innerHTML = phoneNumbers.map((p, i) => `
+    <label class="phone-choice-row">
+      <input type="radio" name="picked_phone_opt" value="${escapeHtml(p)}" ${i === 0 ? 'checked' : ''} />
+      <div>
+        <strong>${escapeHtml(p)}</strong>
+        <div style="font-size:12px;color:var(--muted);">${escapeHtml(contactName)}</div>
+      </div>
+    </label>
+  `).join('') + `
+    <label class="phone-choice-row" style="border-style:dashed;">
+      <input type="radio" name="picked_phone_opt" value="__ALL__" />
+      <div>
+        <strong style="color:var(--accent);">👥 Tüm Numaraları Ekle (${phoneNumbers.length} Numara)</strong>
+        <div style="font-size:12px;color:var(--muted);">Hepsi ayrı kişi olarak kaydedilir</div>
+      </div>
+    </label>
+  `;
+
+  document.getElementById('choosePhoneModal').classList.remove('hidden');
+}
+
+document.getElementById('cancelChoosePhoneBtn').onclick = () => {
+  document.getElementById('choosePhoneModal').classList.add('hidden');
+  pendingPhoneChoiceCb = null;
 };
 
-// 1. Android Chrome Contact Picker API (User Gesture korunarak doğrudan çağrılır)
+document.getElementById('confirmChoosePhoneBtn').onclick = async () => {
+  const checked = document.querySelector('input[name="picked_phone_opt"]:checked');
+  if (!checked) return;
+  const val = checked.value;
+  document.getElementById('choosePhoneModal').classList.add('hidden');
+  if (pendingPhoneChoiceCb) {
+    const cb = pendingPhoneChoiceCb;
+    pendingPhoneChoiceCb = null;
+    await cb(val);
+  }
+};
+
+// Android Chrome Contact Picker (Resim 2'de "Cem ORTİ + 2 tane daha" seçilip Bitti dendiğinde çalışır)
 document.getElementById('pickFromPhoneBtn').onclick = () => {
   if (!window.isSecureContext) {
     return alert('Telefon rehberine erişmek için sayfanın HTTPS adresinden açılması gerekir.');
   }
   if (navigator.contacts && typeof navigator.contacts.select === 'function') {
-    navigator.contacts.select(['name', 'tel'], { multiple: true })
+    navigator.contacts.select(['name', 'tel'], { multiple: false })
       .then(async (picked) => {
         if (!picked || picked.length === 0) return;
-        const formatted = [];
-        for (const item of picked) {
-          const n = (item.name && item.name[0]) || '';
-          const tels = item.tel || [];
-          for (const t of tels) {
-            if (t) formatted.push({ name: n, phone: t });
+
+        const person = picked[0];
+        const names = cleanStringArray(person.name);
+        const contactName = names[0] || 'Rehber Kişisi';
+
+        // Tekrar eden numaraları temizle (örn: 05423832663 ve +905423832663 aynıysa tekilleştir)
+        const rawTels = cleanStringArray(person.tel);
+        const uniqueTels = [];
+        const seenNorm = new Set();
+        for (const t of rawTels) {
+          const digits = t.replace(/\D/g, '').slice(-10);
+          if (digits && !seenNorm.has(digits)) {
+            seenNorm.add(digits);
+            uniqueTels.push(t);
           }
         }
-        if (formatted.length === 0) {
-          return alert('Seçilen kişide telefon numarası bulunamadı.');
+
+        document.getElementById('addContactModal').classList.add('hidden');
+
+        if (uniqueTels.length === 0) {
+          document.getElementById('newContactName').value = contactName;
+          document.getElementById('addContactModal').classList.remove('hidden');
+          return alert(`"${contactName}" kişisinde kayıtlı numara bulunamadı. Lütfen numarasını yazın.`);
         }
-        await saveNewContacts({ contacts: formatted });
+
+        // Eğer birden fazla numara varsa (Resim 2'deki gibi "+ 2 tane daha") kullanıcıya seçim ekranı aç!
+        if (uniqueTels.length > 1) {
+          showChoosePhoneModal(contactName, uniqueTels, async (chosen) => {
+            const listToSave = chosen === '__ALL__'
+              ? uniqueTels.map((p, idx) => ({ name: `${contactName} (${idx + 1})`, phone: p }))
+              : [{ name: contactName, phone: chosen }];
+            await saveNewContactsWithRetry({ contacts: listToSave });
+          });
+        } else {
+          await saveNewContactsWithRetry({ contacts: [{ name: contactName, phone: uniqueTels[0] }] });
+        }
       })
       .catch((err) => {
-        if (err.name !== 'AbortError') {
-          alert('Rehber açılamadı: ' + err.message + '. Aşağıdan numara yazarak ekleyebilirsiniz.');
+        if (err && err.name !== 'AbortError') {
+          alert('Rehber açılamadı: ' + err.message);
         }
       });
   } else {
-    alert('Bu cihaz/tarayıcı doğrudan rehber penceresini desteklemiyor (iPhone Safari vb.). "iPhone / .vcf Dosyası" butonunu veya aşağıdaki numara kutusunu kullanın.');
+    alert('Bu cihaz/tarayıcı doğrudan rehber penceresini desteklemiyor. "iPhone / .vcf Dosyası" butonunu veya aşağıdaki numara kutusunu kullanın.');
   }
 };
 
-// 2. iOS (iPhone) ve Android .vcf Kişi Kartı Aktarımı
-document.getElementById('pickVcfFileBtn').onclick = () => {
-  document.getElementById('vcfFileInput').click();
-};
-
+document.getElementById('pickVcfFileBtn').onclick = () => document.getElementById('vcfFileInput').click();
 document.getElementById('vcfFileInput').onchange = async (e) => {
   const files = Array.from(e.target.files || []);
   e.target.value = '';
   if (files.length === 0) return;
-
   let allText = '';
-  for (const f of files) {
-    allText += '\n' + (await f.text());
-  }
-  await saveNewContacts({ rawText: allText });
+  for (const f of files) allText += '\n' + (await f.text());
+  await saveNewContactsWithRetry({ rawText: allText });
 };
 
-// 3. Manuel Tekli Ekleme
 document.getElementById('manualContactForm').onsubmit = async (e) => {
   e.preventDefault();
   const name = document.getElementById('newContactName').value.trim();
   const phone = document.getElementById('newContactPhone').value.trim();
-  await saveNewContacts({ contacts: [{ name, phone }] });
+  await saveNewContactsWithRetry({ contacts: [{ name, phone }] });
   document.getElementById('newContactName').value = '';
   document.getElementById('newContactPhone').value = '';
 };
 
-// 4. Toplu Metin Yapıştırma
 document.getElementById('bulkPasteBtn').onclick = async () => {
   const rawText = document.getElementById('bulkPasteInput').value.trim();
   if (!rawText) return alert('Lütfen en az bir numara yazın.');
-  await saveNewContacts({ rawText });
+  await saveNewContactsWithRetry({ rawText });
   document.getElementById('bulkPasteInput').value = '';
 };
 
-async function saveNewContacts(payload) {
-  try {
-    const res = await api('/api/contacts/add', 'POST', payload);
-    document.getElementById('addContactModal').classList.add('hidden');
-    await loadContacts();
+// Android rehber ekranından dönüşte ağ soketi uyanma gecikmesine karşı kalıcı kuyruklu ve yeniden denemeli kayıt
+async function saveNewContactsWithRetry(payload) {
+  localStorage.setItem('nexus_pending_contact_import', JSON.stringify(payload));
+  await flushPendingContactImport();
+}
 
-    if (res.contacts && res.contacts.length > 0) {
-      const added = res.contacts[0];
-      openChat(added);
-      showInviteModal(added);
+async function flushPendingContactImport() {
+  const raw = localStorage.getItem('nexus_pending_contact_import');
+  if (!raw) return;
+  let payload;
+  try { payload = JSON.parse(raw); } catch { localStorage.removeItem('nexus_pending_contact_import'); return; }
+
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      // Android arka plandan dönünce ağ bağlantısının toparlanması için kısa bekleme
+      await new Promise((r) => setTimeout(r, 350 * attempt));
+      const res = await api('/api/contacts/add', 'POST', payload);
+      localStorage.removeItem('nexus_pending_contact_import');
+      document.getElementById('addContactModal').classList.add('hidden');
+      await loadContacts();
+
+      if (res.contacts && res.contacts.length > 0) {
+        const added = res.contacts[0];
+        openChat(added);
+        showInviteModal(added);
+      }
+      return;
+    } catch (err) {
+      if (attempt === 3) {
+        localStorage.removeItem('nexus_pending_contact_import');
+        alert('Kişi eklenemedi: ' + err.message);
+      }
     }
-  } catch (err) {
-    alert(err.message);
   }
 }
 
@@ -391,9 +502,7 @@ function showInviteModal(contact) {
   document.getElementById('inviteModal').classList.remove('hidden');
 }
 
-document.getElementById('closeInviteModalBtn').onclick = () => {
-  document.getElementById('inviteModal').classList.add('hidden');
-};
+document.getElementById('closeInviteModalBtn').onclick = () => document.getElementById('inviteModal').classList.add('hidden');
 
 // --- SOHBET VE ŞİFRELİ MESAJLAŞMA ---
 async function openChat(peer) {
@@ -425,9 +534,7 @@ function updateChatHeader() {
   document.getElementById('smsInviteBtn').onclick = () => { location.href = activePeer.smsUrl; };
 }
 
-document.getElementById('backBtn').onclick = () => {
-  document.getElementById('appScreen').classList.remove('mobile-chat');
-};
+document.getElementById('backBtn').onclick = () => document.getElementById('appScreen').classList.remove('mobile-chat');
 
 async function loadMessages(peerId) {
   const data = await api(`/api/messages/${peerId}`);
@@ -511,7 +618,29 @@ document.getElementById('fileInput').onchange = (e) => {
   reader.readAsDataURL(file);
 };
 
-// --- GERÇEK ZAMANLI SESLİ VE GÖRÜNTÜLÜ ARAMA ---
+// --- KESİNTİSİZ SESLİ VE GÖRÜNTÜLÜ ARAMA (WebRTC + TURN + CGNAT WebSocket Medya Rölesi) ---
+function ensureAudioEngine() {
+  if (!callAudioCtx || callAudioCtx.state === 'closed') {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    callAudioCtx = new Ctx();
+    speakerGain = callAudioCtx.createGain();
+    speakerGain.gain.value = isSpeakerOn ? 3.5 : 1.8;
+    speakerGain.connect(callAudioCtx.destination);
+    nextPlayTime = 0;
+  }
+  if (callAudioCtx.state === 'suspended') callAudioCtx.resume().catch(() => {});
+  return callAudioCtx;
+}
+
+document.getElementById('toggleSpeakerBtn').onclick = () => {
+  isSpeakerOn = !isSpeakerOn;
+  ensureAudioEngine();
+  if (speakerGain) speakerGain.gain.value = isSpeakerOn ? 3.5 : 1.8;
+  const btn = document.getElementById('toggleSpeakerBtn');
+  btn.textContent = isSpeakerOn ? '🔊 Hoparlör Açık' : '🔈 Hoparlör';
+  btn.style.background = isSpeakerOn ? '#10b981' : '';
+};
+
 function startRingtone() {
   stopRingtone();
   const beep = () => {
@@ -537,11 +666,40 @@ function stopRingtone() {
   ringInterval = null;
 }
 
+async function getUserMediaSafe(callType) {
+  try {
+    return await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      video: callType === 'video' ? { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } } : false
+    });
+  } catch {
+    // Kamera meşgulse veya izin verilmediyse sesli olarak devam et
+    try {
+      return await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    } catch {
+      return null;
+    }
+  }
+}
+
 async function setupPeerConnection(targetUserId, callId) {
+  if (pc) try { pc.close(); } catch {}
+  remoteStream = new MediaStream();
+
   pc = new RTCPeerConnection({
     iceServers: [
       { urls: 'stun:stun.l.google.com:19302' },
-      { urls: 'stun:stun.cloudflare.com:3478' }
+      { urls: 'stun:stun1.l.google.com:19302' },
+      { urls: 'stun:stun.cloudflare.com:3478' },
+      {
+        urls: [
+          'turn:openrelay.metered.ca:80',
+          'turn:openrelay.metered.ca:443',
+          'turn:openrelay.metered.ca:443?transport=tcp'
+        ],
+        username: 'openrelayproject',
+        credential: 'openrelayproject'
+      }
     ]
   });
 
@@ -557,9 +715,163 @@ async function setupPeerConnection(targetUserId, callId) {
   };
 
   pc.ontrack = (ev) => {
+    if (ev.track) remoteStream.addTrack(ev.track);
+    const stream = (ev.streams && ev.streams[0]) ? ev.streams[0] : remoteStream;
+
     const remoteVid = document.getElementById('remoteVideo');
-    if (ev.streams && ev.streams[0]) remoteVid.srcObject = ev.streams[0];
+    const remoteAud = document.getElementById('remoteAudio');
+    remoteVid.srcObject = stream;
+    remoteAud.srcObject = stream;
+    remoteVid.muted = false;
+    remoteAud.muted = false;
+    remoteVid.play().catch(() => {});
+    remoteAud.play().catch(() => {});
   };
+
+  // WebRTC UDP paketleri mobil operatör (CGNAT) tarafından engellenirse otomatik röle devreye girer
+  if (statsInterval) clearInterval(statsInterval);
+  lastAudioBytes = 0;
+  lastVideoBytes = 0;
+  statsInterval = setInterval(async () => {
+    if (!pc || !activeCall) return;
+    try {
+      const stats = await pc.getStats();
+      let aBytes = 0, vBytes = 0;
+      stats.forEach((r) => {
+        if (r.type === 'inbound-rtp' && !r.isRemote) {
+          if ((r.kind || r.mediaType) === 'audio') aBytes += Number(r.bytesReceived || 0);
+          if ((r.kind || r.mediaType) === 'video') vBytes += Number(r.bytesReceived || 0);
+        }
+      });
+      webrtcAudioActive = (aBytes - lastAudioBytes) > 500;
+      webrtcVideoActive = (vBytes - lastVideoBytes) > 1500;
+      lastAudioBytes = aBytes;
+      lastVideoBytes = vBytes;
+      if (webrtcVideoActive) {
+        document.getElementById('remoteRelayImg').classList.add('hidden');
+      }
+    } catch {}
+  }, 1000);
+}
+
+// Mobil 4.5G/5G CGNAT arkasında WebRTC engellendiğinde bile ses ve görüntüyü WebSocket üzerinden taşıyan yedek motor
+function startWsMediaRelay() {
+  stopWsMediaRelay();
+  if (!localStream || !activeCall) return;
+
+  // 1. Canlı Ses Aktarımı (12 kHz PCM)
+  try {
+    const aTrack = localStream.getAudioTracks()[0];
+    if (aTrack) {
+      const ctx = ensureAudioEngine();
+      const src = ctx.createMediaStreamSource(new MediaStream([aTrack]));
+      const proc = ctx.createScriptProcessor(4096, 1, 1);
+      const ratio = (ctx.sampleRate || 48000) / 12000;
+
+      proc.onaudioprocess = (e) => {
+        if (!activeCall || !ws || ws.readyState !== WebSocket.OPEN) return;
+        const track = localStream?.getAudioTracks()[0];
+        if (!track || !track.enabled) return;
+
+        const input = e.inputBuffer.getChannelData(0);
+        const outLen = Math.floor(input.length / ratio);
+        const pcm16 = new Int16Array(outLen);
+        let maxAmp = 0;
+        for (let i = 0; i < outLen; i++) {
+          const s = Math.max(-1, Math.min(1, (input[Math.floor(i * ratio)] || 0) * 1.5));
+          if (Math.abs(s) > maxAmp) maxAmp = Math.abs(s);
+          pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+        }
+        if (maxAmp < 0.002) return;
+
+        const bytes = new Uint8Array(pcm16.buffer);
+        let bin = '';
+        for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+
+        ws.send(JSON.stringify({
+          type: 'CALL_MEDIA',
+          kind: 'audio',
+          targetUserId: activeCall.targetUserId,
+          pcmB64: btoa(bin)
+        }));
+      };
+
+      const zeroGain = ctx.createGain();
+      zeroGain.gain.value = 0;
+      src.connect(proc);
+      proc.connect(zeroGain);
+      zeroGain.connect(ctx.destination);
+      wsAudioProc = { src, proc, zeroGain };
+    }
+  } catch {}
+
+  // 2. Canlı Görüntü Aktarımı
+  const vTrack = localStream.getVideoTracks()[0];
+  if (vTrack) {
+    const canvas = document.createElement('canvas');
+    canvas.width = 240;
+    canvas.height = 320;
+    const c2d = canvas.getContext('2d');
+    const localVid = document.getElementById('localVideo');
+
+    wsVideoTimer = setInterval(() => {
+      if (!activeCall || !ws || ws.readyState !== WebSocket.OPEN) return;
+      const vt = localStream?.getVideoTracks()[0];
+      if (!vt || !vt.enabled || !localVid || localVid.readyState < 2) return;
+      try {
+        c2d.drawImage(localVid, 0, 0, canvas.width, canvas.height);
+        ws.send(JSON.stringify({
+          type: 'CALL_MEDIA',
+          kind: 'video',
+          targetUserId: activeCall.targetUserId,
+          frameUrl: canvas.toDataURL('image/jpeg', 0.48)
+        }));
+      } catch {}
+    }, 240);
+  }
+}
+
+function stopWsMediaRelay() {
+  if (wsAudioProc) {
+    try {
+      wsAudioProc.src.disconnect();
+      wsAudioProc.proc.disconnect();
+      wsAudioProc.zeroGain.disconnect();
+    } catch {}
+    wsAudioProc = null;
+  }
+  if (wsVideoTimer) {
+    clearInterval(wsVideoTimer);
+    wsVideoTimer = null;
+  }
+}
+
+function handleIncomingWsMedia(ev) {
+  if (!activeCall) return;
+  if (ev.kind === 'audio' && ev.pcmB64 && !webrtcAudioActive) {
+    try {
+      const ctx = ensureAudioEngine();
+      const bin = atob(ev.pcmB64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      const pcm16 = new Int16Array(bytes.buffer);
+      const buf = ctx.createBuffer(1, pcm16.length, 12000);
+      const ch = buf.getChannelData(0);
+      for (let i = 0; i < pcm16.length; i++) ch[i] = pcm16[i] / 32768.0;
+
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      src.connect(speakerGain);
+      const now = ctx.currentTime;
+      if (nextPlayTime < now || nextPlayTime > now + 0.5) nextPlayTime = now + 0.03;
+      src.start(nextPlayTime);
+      nextPlayTime += buf.duration;
+    } catch {}
+  } else if (ev.kind === 'video' && ev.frameUrl && !webrtcVideoActive) {
+    const img = document.getElementById('remoteRelayImg');
+    img.src = ev.frameUrl;
+    img.classList.remove('hidden');
+  }
 }
 
 document.getElementById('audioCallBtn').onclick = () => initiateCall('audio');
@@ -568,26 +880,32 @@ document.getElementById('videoCallBtn').onclick = () => initiateCall('video');
 async function initiateCall(callType) {
   if (!activePeer || !activePeer.isRegistered) return alert('Bu kişi henüz uygulamaya kayıt olmamış.');
   const callId = 'call_' + Date.now();
-  activeCall = { callId, targetUserId: activePeer.id, callType };
+  isSpeakerOn = callType === 'video';
+  ensureAudioEngine();
 
+  // Tarayıcı ses/video oynatıcı kilidini kullanıcı tıklaması sırasında aç
+  document.getElementById('remoteVideo').play().catch(() => {});
+  document.getElementById('remoteAudio').play().catch(() => {});
+
+  activeCall = { callId, targetUserId: activePeer.id, callType };
   document.getElementById('callScreen').classList.remove('hidden');
   document.getElementById('incomingCallControls').classList.add('hidden');
   document.getElementById('activeCallControls').classList.remove('hidden');
+  document.getElementById('remoteRelayImg').classList.add('hidden');
   document.getElementById('callPeerTitle').textContent = activePeer.display_name;
   document.getElementById('callStatusText').textContent = callType === 'video' ? '📹 Görüntülü Aranıyor...' : '📞 Sesli Aranıyor...';
   startRingtone();
 
-  localStream = await navigator.mediaDevices.getUserMedia({
-    audio: true,
-    video: callType === 'video'
-  });
-  document.getElementById('localVideo').srcObject = localStream;
-  document.getElementById('localVideo').classList.toggle('hidden', callType !== 'video');
+  localStream = await getUserMediaSafe(callType);
+  const localVid = document.getElementById('localVideo');
+  localVid.srcObject = localStream;
+  localVid.classList.toggle('hidden', !localStream || localStream.getVideoTracks().length === 0);
+  if (localStream) localVid.play().catch(() => {});
 
   await setupPeerConnection(activePeer.id, callId);
-  localStream.getTracks().forEach((t) => pc.addTrack(t, localStream));
+  if (localStream) localStream.getTracks().forEach((t) => pc.addTrack(t, localStream));
 
-  const offer = await pc.createOffer();
+  const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: callType === 'video' });
   await pc.setLocalDescription(offer);
 
   ws.send(JSON.stringify({
@@ -604,6 +922,7 @@ function showIncomingCallScreen(offerData) {
   document.getElementById('callScreen').classList.remove('hidden');
   document.getElementById('incomingCallControls').classList.remove('hidden');
   document.getElementById('activeCallControls').classList.add('hidden');
+  document.getElementById('remoteRelayImg').classList.add('hidden');
   document.getElementById('callPeerTitle').textContent = offerData.fromDisplayName;
   document.getElementById('callStatusText').textContent =
     offerData.callType === 'video' ? '📹 Gelen Görüntülü Arama...' : '📞 Gelen Sesli Arama...';
@@ -616,21 +935,25 @@ async function acceptIncomingCall() {
   stopRingtone();
   const offer = incomingOffer;
   incomingOffer = null;
-  activeCall = { callId: offer.callId, targetUserId: offer.fromUserId, callType: offer.callType };
+  isSpeakerOn = offer.callType === 'video';
+  ensureAudioEngine();
 
+  document.getElementById('remoteVideo').play().catch(() => {});
+  document.getElementById('remoteAudio').play().catch(() => {});
+
+  activeCall = { callId: offer.callId, targetUserId: offer.fromUserId, callType: offer.callType };
   document.getElementById('incomingCallControls').classList.add('hidden');
   document.getElementById('activeCallControls').classList.remove('hidden');
   document.getElementById('callStatusText').textContent = '🟢 Görüşme Aktif';
 
-  localStream = await navigator.mediaDevices.getUserMedia({
-    audio: true,
-    video: offer.callType === 'video'
-  });
-  document.getElementById('localVideo').srcObject = localStream;
-  document.getElementById('localVideo').classList.toggle('hidden', offer.callType !== 'video');
+  localStream = await getUserMediaSafe(offer.callType);
+  const localVid = document.getElementById('localVideo');
+  localVid.srcObject = localStream;
+  localVid.classList.toggle('hidden', !localStream || localStream.getVideoTracks().length === 0);
+  if (localStream) localVid.play().catch(() => {});
 
   await setupPeerConnection(offer.fromUserId, offer.callId);
-  localStream.getTracks().forEach((t) => pc.addTrack(t, localStream));
+  if (localStream) localStream.getTracks().forEach((t) => pc.addTrack(t, localStream));
 
   await pc.setRemoteDescription(new RTCSessionDescription(offer.sdp));
   for (const cand of pendingCandidates) await pc.addIceCandidate(new RTCIceCandidate(cand)).catch(() => {});
@@ -645,6 +968,8 @@ async function acceptIncomingCall() {
     targetUserId: offer.fromUserId,
     sdp: answer
   }));
+
+  startWsMediaRelay();
 }
 
 document.getElementById('rejectCallBtn').onclick = () => {
@@ -681,12 +1006,16 @@ document.getElementById('toggleCamBtn').onclick = () => {
 
 function closeCallScreen() {
   stopRingtone();
+  stopWsMediaRelay();
+  if (statsInterval) clearInterval(statsInterval);
   if (localStream) localStream.getTracks().forEach((t) => t.stop());
   localStream = null;
   if (pc) pc.close();
   pc = null;
   activeCall = null;
   incomingOffer = null;
+  webrtcAudioActive = false;
+  webrtcVideoActive = false;
   document.getElementById('callScreen').classList.add('hidden');
 }
 

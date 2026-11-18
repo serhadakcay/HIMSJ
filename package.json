@@ -1,7 +1,7 @@
 {
   "name": "nexuschat-whatsapp-e2ee",
-  "version": "4.0.0",
-  "description": "Android + iOS + Bilgisayar kurulum sihirbazlı, çoklu format telefon rehberi (Contact Picker + VCF + Metin) ve E2EE mesajlaşma/arama uygulaması",
+  "version": "5.0.0",
+  "description": "WebRTC + CGNAT Röleli Sesli/Görüntülü Arama, Çoklu Numara Seçimli Android/iOS Rehber Aktarımı ve Cihaz/Sekme Bazlı Akıllı Bildirim Yönlendirmeli E2EE İletişim Uygulaması",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"

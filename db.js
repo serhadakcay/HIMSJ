@@ -35,6 +35,7 @@ db.exec(`
     token TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,
     device_name TEXT DEFAULT 'Cihaz',
+    device_type TEXT DEFAULT 'mobile',
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
   );
@@ -70,12 +71,16 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS push_subscriptions (
     endpoint TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,
+    device_type TEXT DEFAULT 'mobile',
     p256dh TEXT NOT NULL,
     auth TEXT NOT NULL,
     updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
   );
 `);
+
+try { db.exec("ALTER TABLE sessions ADD COLUMN device_type TEXT DEFAULT 'mobile'"); } catch {}
+try { db.exec("ALTER TABLE push_subscriptions ADD COLUMN device_type TEXT DEFAULT 'mobile'"); } catch {}
 
 function normalizePhone(rawPhone) {
   if (!rawPhone) return '';

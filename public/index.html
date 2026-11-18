@@ -69,14 +69,17 @@
     .install-card h4 { margin-bottom: 6px; font-size: 15px; }
     .install-card p, .install-card li { font-size: 13px; color: var(--muted); line-height: 1.5; }
     .install-card ol { margin-left: 18px; margin-top: 6px; }
+    .phone-choice-row { display: flex; align-items: center; gap: 10px; padding: 12px; background: var(--input); border: 1px solid var(--border); border-radius: 10px; margin-bottom: 8px; cursor: pointer; }
+    .phone-choice-row input { width: 18px; height: 18px; margin: 0; accent-color: var(--accent); }
 
     /* Tam Ekran Sesli / Görüntülü Arama Ekranı */
     #callScreen { position: fixed; inset: 0; background: #070b0e; z-index: 200; display: flex; flex-direction: column; justify-content: space-between; padding: 24px; text-align: center; }
     .video-box { flex: 1; position: relative; border-radius: 16px; overflow: hidden; background: #111b21; margin: 16px 0; display: flex; align-items: center; justify-content: center; }
-    #remoteVideo { width: 100%; height: 100%; object-fit: cover; }
-    #localVideo { position: absolute; right: 14px; bottom: 14px; width: 120px; height: 160px; border-radius: 12px; object-fit: cover; border: 2px solid var(--accent); background: #000; }
-    .call-actions { display: flex; justify-content: center; gap: 14px; flex-wrap: wrap; }
-    .call-btn { width: auto; padding: 14px 22px; border-radius: 30px; font-size: 15px; }
+    #remoteVideo { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; z-index: 1; }
+    #remoteRelayImg { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; z-index: 2; }
+    #localVideo { position: absolute; right: 14px; bottom: 14px; width: 120px; height: 160px; border-radius: 12px; object-fit: cover; border: 2px solid var(--accent); background: #000; z-index: 5; }
+    .call-actions { display: flex; justify-content: center; gap: 12px; flex-wrap: wrap; }
+    .call-btn { width: auto; padding: 13px 20px; border-radius: 30px; font-size: 14.5px; }
     .btn-red { background: var(--danger); color: #fff; }
 
     @media (max-width: 740px) {
@@ -90,8 +93,8 @@
 </head>
 <body>
 
-  <!-- Gizli Rehber (.vcf) Dosya Seçici (iOS & Android Tüm Cihazlar) -->
   <input type="file" id="vcfFileInput" accept=".vcf,.vcard,text/vcard,text/x-vcard,*/*" multiple class="hidden" />
+  <audio id="remoteAudio" autoplay playsinline class="hidden"></audio>
 
   <!-- 1. Şifreli Giriş & Kayıt Ekranı -->
   <div id="authScreen">
@@ -175,7 +178,7 @@
     </section>
   </div>
 
-  <!-- 3. Telefon Rehberi (Android + iOS + VCF + Manuel) Kişi Ekleme Modalı -->
+  <!-- 3. Telefon Rehberi Kişi Ekleme Modalı -->
   <div id="addContactModal" class="modal-bg hidden">
     <div class="modal">
       <h3>📒 Rehberden veya Numaradan Kişi Ekle</h3>
@@ -190,8 +193,8 @@
 
       <form id="manualContactForm" class="install-card" style="padding:12px;">
         <h4 style="color:var(--accent);">2. Numara ile Hızlı Ekle</h4>
-        <input type="text" id="newContactName" placeholder="Kişi Adı (Örn: Ahmet Yılmaz)" style="margin-top:6px;" />
-        <input type="tel" id="newContactPhone" placeholder="Cep Telefonu (Örn: 0532 111 22 33)" required />
+        <input type="text" id="newContactName" placeholder="Kişi Adı (Örn: Cem ORTİ)" style="margin-top:6px;" />
+        <input type="tel" id="newContactPhone" placeholder="Cep Telefonu (Örn: 0542 383 26 63)" required />
         <button type="submit" style="margin-bottom:0;">💾 Kaydet & Davet Bağlantısı Oluştur</button>
       </form>
 
@@ -205,30 +208,40 @@
     </div>
   </div>
 
-  <!-- 4. Android & iOS (iPhone) Kurulum Sihirbazı Modalı -->
+  <!-- 4. Birden Fazla Numarası Olan Kişi İçin Numara Seçim Modalı -->
+  <div id="choosePhoneModal" class="modal-bg hidden">
+    <div class="modal">
+      <h3 id="choosePhoneTitle">📱 Telefon Numarası Seçin</h3>
+      <p id="choosePhoneDesc" style="font-size:13px;color:var(--muted);margin-bottom:12px;"></p>
+      <div id="choosePhoneList" style="margin-bottom:12px;"></div>
+      <div style="display:flex;gap:8px;">
+        <button type="button" class="btn-sec" id="cancelChoosePhoneBtn">İptal</button>
+        <button type="button" id="confirmChoosePhoneBtn">💾 Seçilen Numarayı Kaydet</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 5. Android & iOS Kurulum Sihirbazı Modalı -->
   <div id="installModal" class="modal-bg hidden">
     <div class="modal">
       <h3>📲 Cep Telefonuna (iOS & Android) Kurulum</h3>
 
-      <!-- Android Kurulumu -->
       <div class="install-card">
         <h4 style="color:#22c55e;">🤖 Android (Chrome / Samsung Internet)</h4>
         <p>Uygulamayı ana ekranınıza gerçek uygulama simgesi olarak yükleyin:</p>
         <button type="button" id="androidDirectInstallBtn" style="margin-top:8px;background:#16a34a;color:#fff;">⬇️ Android'e Şimdi Yükle</button>
-        <ol id="androidManualSteps">
+        <ol>
           <li>Sağ üst köşedeki <strong>⋮ (Üç Nokta)</strong> menüsüne dokunun.</li>
           <li><strong>"Ana ekrana ekle"</strong> veya <strong>"Uygulamayı yükle"</strong> seçeneğine basın.</li>
         </ol>
       </div>
 
-      <!-- iOS (iPhone / iPad) Kurulumu -->
       <div class="install-card">
         <h4 style="color:#38bdf8;">🍏 iPhone & iPad (iOS Safari)</h4>
-        <p>Apple cihazlarda uygulama kurulumu Safari üzerinden 3 adımda yapılır:</p>
         <ol>
           <li>Bu sayfayı <strong>Safari</strong> tarayıcısında açın.</li>
           <li>Alt ortadaki <strong>Paylaş (⬆️ Kare içinde yukarı ok)</strong> simgesine dokunun.</li>
-          <li>Açılan menüden <strong>"Ana Ekrana Ekle" (Add to Home Screen)</strong> seçeneğine dokunup <strong>Ekle</strong> deyin.</li>
+          <li>Açılan menüden <strong>"Ana Ekrana Ekle"</strong> seçeneğine dokunup <strong>Ekle</strong> deyin.</li>
         </ol>
       </div>
 
@@ -236,7 +249,7 @@
     </div>
   </div>
 
-  <!-- 5. SMS & WhatsApp Davet Gönderme Modalı -->
+  <!-- 6. SMS & WhatsApp Davet Gönderme Modalı -->
   <div id="inviteModal" class="modal-bg hidden">
     <div class="modal">
       <h3>📲 Kişiyi Programa Davet Et</h3>
@@ -249,16 +262,17 @@
     </div>
   </div>
 
-  <!-- 6. Tam Ekran Sesli / Görüntülü Arama Ekranı -->
+  <!-- 7. Tam Ekran Sesli / Görüntülü Arama Ekranı -->
   <div id="callScreen" class="hidden">
     <div>
-      <span style="background:rgba(0,168,132,0.2);color:var(--accent);padding:4px 12px;border-radius:16px;font-size:12px;">🔒 Uçtan Uca Şifreli WebRTC Arama</span>
+      <span style="background:rgba(0,168,132,0.2);color:var(--accent);padding:4px 12px;border-radius:16px;font-size:12px;">🔒 Uçtan Uca Şifreli Canlı Arama</span>
       <h2 id="callPeerTitle" style="margin-top:12px;">Aranıyor...</h2>
       <p id="callStatusText" style="color:var(--muted);font-size:14px;margin-top:4px;">Çalıyor...</p>
     </div>
 
     <div class="video-box">
       <video id="remoteVideo" autoplay playsinline></video>
+      <img id="remoteRelayImg" class="hidden" alt="Canlı Görüntü" />
       <video id="localVideo" autoplay playsinline muted></video>
     </div>
 
@@ -268,6 +282,7 @@
     </div>
 
     <div class="call-actions" id="activeCallControls">
+      <button class="call-btn btn-sec" id="toggleSpeakerBtn">🔈 Hoparlör</button>
       <button class="call-btn btn-sec" id="toggleMicBtn">🎤 Mikrofon</button>
       <button class="call-btn btn-sec" id="toggleCamBtn">📷 Kamera</button>
       <button class="call-btn btn-red" id="hangupCallBtn">📞 Kapat</button>
