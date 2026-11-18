@@ -8,7 +8,7 @@ if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 
-const DB_PATH = path.join(DATA_DIR, 'nexuschat.sqlite');
+const DB_PATH = path.join(DATA_DIR, 'nexuschat_v6.sqlite');
 const db = new DatabaseSync(DB_PATH);
 
 db.exec(`
@@ -27,6 +27,8 @@ db.exec(`
     public_key_jwk TEXT DEFAULT '',
     key_fingerprint TEXT DEFAULT '',
     avatar_color TEXT DEFAULT '#00a884',
+    avatar_url TEXT DEFAULT '',
+    bio TEXT DEFAULT 'Merhaba! NexusChat E2EE kullanıyorum.',
     last_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
   );
@@ -68,6 +70,26 @@ db.exec(`
     FOREIGN KEY (recipient_id) REFERENCES users(id) ON DELETE CASCADE
   );
 
+  CREATE TABLE IF NOT EXISTS stories (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    caption TEXT DEFAULT '',
+    media_url TEXT DEFAULT '',
+    bg_color TEXT DEFAULT '#0f766e',
+    expires_at TEXT NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS story_views (
+    story_id TEXT NOT NULL,
+    viewer_id TEXT NOT NULL,
+    viewed_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (story_id, viewer_id),
+    FOREIGN KEY (story_id) REFERENCES stories(id) ON DELETE CASCADE,
+    FOREIGN KEY (viewer_id) REFERENCES users(id) ON DELETE CASCADE
+  );
+
   CREATE TABLE IF NOT EXISTS push_subscriptions (
     endpoint TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,
@@ -79,8 +101,8 @@ db.exec(`
   );
 `);
 
-try { db.exec("ALTER TABLE sessions ADD COLUMN device_type TEXT DEFAULT 'mobile'"); } catch {}
-try { db.exec("ALTER TABLE push_subscriptions ADD COLUMN device_type TEXT DEFAULT 'mobile'"); } catch {}
+try { db.exec("ALTER TABLE users ADD COLUMN avatar_url TEXT DEFAULT ''"); } catch {}
+try { db.exec("ALTER TABLE users ADD COLUMN bio TEXT DEFAULT 'Merhaba! NexusChat E2EE kullanıyorum.'"); } catch {}
 
 function normalizePhone(rawPhone) {
   if (!rawPhone) return '';

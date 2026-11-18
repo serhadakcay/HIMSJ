@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-title NexusChat v5 - Otomatik Başlatıcı
+title NexusChat v6 Ultimate - Otomatik Başlatıcı
 color 0A
 where node >nul 2>nul
 if %errorlevel% neq 0 (

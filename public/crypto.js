@@ -45,8 +45,8 @@ class NexusE2EE {
     const peerPub = await crypto.subtle.importKey('jwk', peerJwk, { name: 'ECDH', namedCurve: 'P-256' }, false, []);
 
     const shared = await crypto.subtle.deriveBits({ name: 'ECDH', public: peerPub }, this.keyPair.privateKey, 256);
-    const chainA = await this._hkdf(shared, 'Nexus-v5-ChainA');
-    const chainB = await this._hkdf(shared, 'Nexus-v5-ChainB');
+    const chainA = await this._hkdf(shared, 'Nexus-v6-ChainA');
+    const chainB = await this._hkdf(shared, 'Nexus-v6-ChainB');
     const isLower = myJwk.x < peerJwk.x;
 
     const state = {
@@ -124,6 +124,33 @@ class NexusE2EE {
     const obj = JSON.parse(new TextDecoder().decode(plainBuf));
     this.plainCache.set(msgRow.id, obj);
     return obj;
+  }
+
+  // Signal / WhatsApp Out-of-Band Şifreli Medya/Dosya Motoru
+  async encryptFileBlob(arrayBuffer) {
+    const rawKey = crypto.getRandomValues(new Uint8Array(32));
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const aesKey = await crypto.subtle.importKey('raw', rawKey, { name: 'AES-GCM' }, false, ['encrypt']);
+    const cipherBuf = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, aesKey, arrayBuffer);
+    const hashBuf = await crypto.subtle.digest('SHA-256', cipherBuf);
+
+    return {
+      encryptedBase64: this._toB64(cipherBuf),
+      mediaKeyB64: this._toB64(rawKey),
+      mediaIvB64: this._toB64(iv),
+      sha256B64: this._toB64(hashBuf)
+    };
+  }
+
+  async decryptFileBlob(encryptedArrayBuf, mediaKeyB64, mediaIvB64, expectedSha256B64) {
+    if (expectedSha256B64) {
+      const actualHash = this._toB64(await crypto.subtle.digest('SHA-256', encryptedArrayBuf));
+      if (actualHash !== expectedSha256B64) {
+        throw new Error('Dosya bütünlük doğrulaması (SHA-256) başarısız!');
+      }
+    }
+    const aesKey = await crypto.subtle.importKey('raw', this._fromB64(mediaKeyB64), { name: 'AES-GCM' }, false, ['decrypt']);
+    return await crypto.subtle.decrypt({ name: 'AES-GCM', iv: this._fromB64(mediaIvB64) }, aesKey, encryptedArrayBuf);
   }
 
   _toB64(buf) {

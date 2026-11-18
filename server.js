@@ -19,9 +19,11 @@ const { ensureVapidKeys, sendWebPush } = require('./push-utils');
 const PORT = Number(process.env.PORT || 3000);
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const CERTS_DIR = path.join(__dirname, 'certs');
+const UPLOADS_DIR = path.join(__dirname, 'uploads');
+if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+
 const vapidKeys = ensureVapidKeys(CERTS_DIR);
 
-// userId -> Set<{ socket, deviceType, isForeground }>
 const onlineSockets = new Map();
 const activeCalls = new Map();
 
@@ -52,7 +54,6 @@ function sendToUser(userId, obj, options = {}) {
   const set = onlineSockets.get(userId);
   if (!set) return;
   for (const client of set) {
-    // Eğer hedef masaüstü (PC) cihazı arka plandaysa veya sekme gizliyse arama/bildirim gönderme
     if (options.skipHiddenDesktop && client.deviceType === 'desktop' && !client.isForeground) {
       continue;
     }
@@ -76,8 +77,6 @@ async function triggerPushToUser(userId, payloadObj) {
   const set = onlineSockets.get(userId) || new Set();
   const hasForegroundDesktop = Array.from(set).some((c) => c.deviceType === 'desktop' && c.isForeground);
 
-  // Yalnızca mobil cihaz aboneliklerine her zaman push gönder; masaüstü (desktop) aboneliklerine
-  // SADECE bilgisayar tarayıcısında sekme aktif olarak açıksa push gönder (bilgisayar kapalı/arkadayken bildirim düşmez!)
   const subs = db.prepare('SELECT endpoint, device_type, p256dh, auth FROM push_subscriptions WHERE user_id = ?').all(userId);
   for (const s of subs) {
     if (s.device_type === 'desktop' && !hasForegroundDesktop) {
@@ -102,10 +101,19 @@ function sendJson(res, status, data) {
   res.end(JSON.stringify(data));
 }
 
-function readJsonBody(req) {
+function readJsonBody(req, maxBytes = 25 * 1024 * 1024) {
   return new Promise((resolve, reject) => {
     const chunks = [];
-    req.on('data', (c) => chunks.push(c));
+    let total = 0;
+    req.on('data', (c) => {
+      total += c.length;
+      if (total > maxBytes) {
+        reject(new Error('Dosya boyutu 25MB sınırını aşıyor.'));
+        req.destroy();
+        return;
+      }
+      chunks.push(c);
+    });
     req.on('end', () => {
       try {
         const raw = Buffer.concat(chunks).toString('utf8');
@@ -123,7 +131,7 @@ function getAuthUser(req) {
   const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
   if (!token) return null;
   return db.prepare(`
-    SELECT u.*, s.device_type as session_device_type FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?
+    SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?
   `).get(token) || null;
 }
 
@@ -162,7 +170,12 @@ const MIME = {
   '.js': 'application/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
-  '.svg': 'image/svg+xml'
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.bin': 'application/octet-stream'
 };
 
 const server = http.createServer(async (req, res) => {
@@ -224,7 +237,7 @@ const server = http.createServer(async (req, res) => {
 
       const token = crypto.randomBytes(32).toString('hex');
       db.prepare('INSERT INTO sessions (token, user_id, device_name, device_type) VALUES (?, ?, ?, ?)').run(token, userId, deviceType === 'desktop' ? 'Bilgisayar' : 'Cep Telefonu', deviceType);
-      const user = db.prepare('SELECT id, display_name, phone, phone_normalized, public_key_jwk, key_fingerprint, avatar_color FROM users WHERE id = ?').get(userId);
+      const user = db.prepare('SELECT id, display_name, phone, phone_normalized, public_key_jwk, key_fingerprint, avatar_color, avatar_url, bio FROM users WHERE id = ?').get(userId);
       return sendJson(res, 201, { token, user });
     }
 
@@ -263,7 +276,9 @@ const server = http.createServer(async (req, res) => {
           phone_normalized: userRow.phone_normalized,
           public_key_jwk: userRow.public_key_jwk,
           key_fingerprint: userRow.key_fingerprint,
-          avatar_color: userRow.avatar_color
+          avatar_color: userRow.avatar_color,
+          avatar_url: userRow.avatar_url || '',
+          bio: userRow.bio || ''
         }
       });
     }
@@ -282,9 +297,36 @@ const server = http.createServer(async (req, res) => {
             phone_normalized: me.phone_normalized,
             public_key_jwk: me.public_key_jwk,
             key_fingerprint: me.key_fingerprint,
-            avatar_color: me.avatar_color
+            avatar_color: me.avatar_color,
+            avatar_url: me.avatar_url || '',
+            bio: me.bio || ''
           }
         });
+      }
+
+      // PROFIL FOTOĞRAFI VE DURUM BİLGİSİ GÜNCELLEME
+      if (pathname === '/api/auth/profile' && req.method === 'PUT') {
+        const body = await readJsonBody(req);
+        const displayName = String(body.displayName || me.display_name).trim();
+        const bio = String(body.bio ?? me.bio).trim();
+        const avatarUrl = body.avatarUrl !== undefined ? String(body.avatarUrl) : (me.avatar_url || '');
+
+        db.prepare('UPDATE users SET display_name = ?, bio = ?, avatar_url = ? WHERE id = ?').run(
+          displayName, bio, avatarUrl, me.id
+        );
+        const updated = db.prepare('SELECT id, display_name, phone, phone_normalized, public_key_jwk, key_fingerprint, avatar_color, avatar_url, bio FROM users WHERE id = ?').get(me.id);
+        return sendJson(res, 200, { user: updated });
+      }
+
+      // ŞİFRELİ MEDYA / DOSYA BLOB YÜKLEME (S3 / CDN Zero-Knowledge Modeli)
+      if (pathname === '/api/blobs' && req.method === 'POST') {
+        const body = await readJsonBody(req, 25 * 1024 * 1024);
+        const b64 = String(body.encryptedBase64 || '');
+        if (!b64) return sendJson(res, 400, { error: 'Boş şifreli veri.' });
+        const buf = Buffer.from(b64, 'base64');
+        const blobId = crypto.randomUUID() + '.bin';
+        fs.writeFileSync(path.join(UPLOADS_DIR, blobId), buf);
+        return sendJson(res, 201, { blobUrl: `/blobs/${blobId}`, size: buf.length });
       }
 
       if (pathname === '/api/push/subscribe' && req.method === 'POST') {
@@ -311,7 +353,7 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 200, { ok: true });
       }
 
-      // 3. TELEFON REHBERİ / VCF / METİN / NUMARA İLE KİŞİ EKLEME
+      // REHBERE KİŞİ EKLEME (Çoklu Kanal + Mevcut Sistem Kullanıcılarını Keşfetme)
       if (pathname === '/api/contacts/add' && req.method === 'POST') {
         const body = await readJsonBody(req);
         let list = Array.isArray(body.contacts) ? body.contacts.slice() : [];
@@ -388,32 +430,35 @@ const server = http.createServer(async (req, res) => {
               publicKeyJwk: target.public_key_jwk,
               keyFingerprint: target.key_fingerprint,
               avatarColor: target.avatar_color,
+              avatarUrl: target.avatar_url || '',
+              bio: target.bio || '',
               ...invite
             });
           }
         }
 
         if (addedResults.length === 0) {
-          if (skippedSelf) {
-            return sendJson(res, 400, { error: 'Kendi telefon numaranızı kişi olarak ekleyemezsiniz.' });
-          }
+          if (skippedSelf) return sendJson(res, 400, { error: 'Kendi telefon numaranızı kişi olarak ekleyemezsiniz.' });
           return sendJson(res, 400, { error: 'Geçerli bir telefon numarası bulunamadı.' });
         }
 
         return sendJson(res, 200, { ok: true, count: addedResults.length, contacts: addedResults });
       }
 
-      // 4. REHBER LİSTESİ
+      // REHBER LİSTESİ + PROGRAMI KULLANAN DİĞER KİŞİLER (WhatsApp/Telegram Rehber Keşfi)
       if (pathname === '/api/contacts' && req.method === 'GET') {
         const appUrl = getPublicUrl(req);
         const rows = db.prepare(`
           SELECT c.contact_name, c.contact_phone, c.contact_phone_normalized,
-                 u.id, u.is_registered, u.public_key_jwk, u.key_fingerprint, u.avatar_color
+                 u.id, u.is_registered, u.public_key_jwk, u.key_fingerprint, u.avatar_color, u.avatar_url, u.bio
           FROM contacts c
           JOIN users u ON u.id = c.contact_user_id
           WHERE c.user_id = ?
           ORDER BY u.is_registered DESC, c.contact_name ASC
         `).all(me.id);
+
+        const savedIds = new Set(rows.map((r) => r.id));
+        savedIds.add(me.id);
 
         const contacts = rows.map((r) => {
           const invite = buildInviteLinks({
@@ -432,14 +477,84 @@ const server = http.createServer(async (req, res) => {
             publicKeyJwk: r.public_key_jwk,
             keyFingerprint: r.key_fingerprint,
             avatarColor: r.avatar_color,
+            avatarUrl: r.avatar_url || '',
+            bio: r.bio || '',
+            isSaved: true,
             ...invite
           };
         });
 
-        return sendJson(res, 200, { contacts });
+        // Sistemde kayıtlı olup henüz rehbere eklenmemiş kullanıcıları da "Keşfet / Rehbere Ekle" için listele
+        const allRegistered = db.prepare('SELECT id, display_name, phone, avatar_color, avatar_url, bio FROM users WHERE is_registered = 1').all();
+        const discoverable = allRegistered
+          .filter((u) => !savedIds.has(u.id))
+          .map((u) => ({
+            id: u.id,
+            display_name: u.display_name,
+            phone: u.phone,
+            avatarColor: u.avatar_color,
+            avatarUrl: u.avatar_url || '',
+            bio: u.bio || '',
+            online: isUserOnline(u.id)
+          }));
+
+        return sendJson(res, 200, { contacts, discoverable });
       }
 
-      // 5. ŞİFRELİ MESAJLAŞMA
+      // 24 SAATLİK DURUM / HİKÂYE GÜNCELLEMELERİ (WhatsApp & Signal Stories)
+      if (pathname === '/api/stories' && req.method === 'GET') {
+        const allowedIds = new Set([me.id]);
+        const myContacts = db.prepare('SELECT contact_user_id FROM contacts WHERE user_id = ?').all(me.id);
+        for (const c of myContacts) allowedIds.add(c.contact_user_id);
+
+        const rows = db.prepare(`
+          SELECT s.*, u.display_name, u.avatar_color, u.avatar_url
+          FROM stories s
+          JOIN users u ON u.id = s.user_id
+          WHERE s.expires_at > datetime('now')
+          ORDER BY s.created_at DESC
+        `).all().filter((s) => allowedIds.has(s.user_id));
+
+        const stories = rows.map((s) => {
+          const views = db.prepare(`
+            SELECT sv.viewer_id, u.display_name, sv.viewed_at
+            FROM story_views sv JOIN users u ON u.id = sv.viewer_id
+            WHERE sv.story_id = ?
+          `).all(s.id);
+          return {
+            ...s,
+            viewCount: views.length,
+            views,
+            viewedByMe: views.some((v) => v.viewer_id === me.id)
+          };
+        });
+
+        return sendJson(res, 200, { stories });
+      }
+
+      if (pathname === '/api/stories' && req.method === 'POST') {
+        const body = await readJsonBody(req, 15 * 1024 * 1024);
+        const caption = String(body.caption || '').trim();
+        const mediaUrl = String(body.mediaUrl || '');
+        const bgColor = String(body.bgColor || '#0f766e');
+        if (!caption && !mediaUrl) return sendJson(res, 400, { error: 'Durum metni veya fotoğrafı seçin.' });
+
+        const storyId = 'st_' + crypto.randomBytes(6).toString('hex');
+        db.prepare(`
+          INSERT INTO stories (id, user_id, caption, media_url, bg_color, expires_at)
+          VALUES (?, ?, ?, ?, ?, datetime('now', '+24 hours'))
+        `).run(storyId, me.id, caption, mediaUrl, bgColor);
+
+        return sendJson(res, 201, { ok: true, storyId });
+      }
+
+      const storyViewMatch = pathname.match(/^\/api\/stories\/([^/]+)\/view$/);
+      if (storyViewMatch && req.method === 'POST') {
+        db.prepare('INSERT OR IGNORE INTO story_views (story_id, viewer_id) VALUES (?, ?)').run(storyViewMatch[1], me.id);
+        return sendJson(res, 200, { ok: true });
+      }
+
+      // ŞİFRELİ MESAJLAŞMA (Metin, Resim, Dosya, Kişi Kartı, Konum)
       const msgMatch = pathname.match(/^\/api\/messages\/([^/]+)$/);
       if (msgMatch) {
         const peerId = msgMatch[1];
@@ -449,7 +564,7 @@ const server = http.createServer(async (req, res) => {
             SELECT * FROM messages
             WHERE (sender_id = ? AND recipient_id = ?) OR (sender_id = ? AND recipient_id = ?)
             ORDER BY created_at ASC, rowid ASC
-            LIMIT 200
+            LIMIT 250
           `).all(me.id, peerId, peerId, me.id);
           return sendJson(res, 200, { messages: rows });
         }
@@ -485,14 +600,24 @@ const server = http.createServer(async (req, res) => {
 
       if (pathname === '/api/calls/active' && req.method === 'GET') {
         const callId = parsedUrl.searchParams.get('callId');
-        if (callId && activeCalls.has(callId)) {
-          return sendJson(res, 200, { call: activeCalls.get(callId) });
-        }
+        if (callId && activeCalls.has(callId)) return sendJson(res, 200, { call: activeCalls.get(callId) });
         for (const call of activeCalls.values()) {
           if (call.targetUserId === me.id) return sendJson(res, 200, { call });
         }
         return sendJson(res, 404, { error: 'Aktif çağrı yok.' });
       }
+    }
+
+    // Şifreli Blob Dosyaları (Zero-Knowledge: Sunucu yalnızca şifreli ikili veri sunar)
+    if (pathname.startsWith('/blobs/')) {
+      const safeBlob = path.basename(pathname);
+      const blobPath = path.join(UPLOADS_DIR, safeBlob);
+      if (fs.existsSync(blobPath)) {
+        res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Cache-Control': 'public, max-age=86400' });
+        return fs.createReadStream(blobPath).pipe(res);
+      }
+      res.writeHead(404);
+      return res.end('Blob Not Found');
     }
 
     const reqPath = pathname === '/' ? '/index.html' : pathname;
@@ -601,7 +726,6 @@ server.on('upgrade', (req, socket) => {
                 createdAt: Date.now()
               });
 
-              // Arka planda veya gizli sekmede duran bilgisayara arama ekranı/bildirimi düşürme!
               if (msg.targetUserId) {
                 sendToUser(msg.targetUserId, packet, { skipHiddenDesktop: true });
               }
@@ -646,5 +770,5 @@ server.on('upgrade', (req, socket) => {
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 NexusChat v5 Sunucusu Çalışıyor -> Port: ${PORT}`);
+  console.log(`🚀 NexusChat v6 Ultimate Sunucusu Çalışıyor -> Port: ${PORT}`);
 });

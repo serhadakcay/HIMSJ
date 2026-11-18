@@ -1,7 +1,7 @@
 {
   "name": "NexusChat E2EE",
   "short_name": "NexusChat",
-  "description": "Uçtan uca şifreli mesajlaşma ve görüntülü arama",
+  "description": "WhatsApp, Telegram & Signal seviyesinde E2EE mesajlaşma, durum ve görüntülü arama",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
