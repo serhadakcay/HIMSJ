@@ -1,6 +1,6 @@
-// BUILD_VER: 700
+// BUILD_VER: 710
 /**
- * Mesajlaşma Uygulaması - İstemci Uygulama Mantığı (v6.0)
+ * Mesajlaşma Uygulaması - İstemci Uygulama Mantığı (v7.1)
  * - Cep Telefonu Rehberinden Kişi Ekleme (Contact Picker API + Anında Optimistik Kayıt + VCF + Toplu Metin + Manuel)
  * - Numara veya Rehberden Eklenen Kişilere SMS ve WhatsApp Mesajı Gönderme
  *   ("............ Bu numaraları kullanıcı sizi programı kullanmak için ekledi")
@@ -109,15 +109,23 @@ const App = {
 
     if ('serviceWorker' in navigator) {
       try {
-        navigator.serviceWorker.addEventListener('message', (ev) => {
+        navigator.serviceWorker.addEventListener('message', async (ev) => {
           if (ev.data && ev.data.type === 'SW_FORCE_RELOAD') {
-            if (sessionStorage.getItem('msj_sw_reloaded_v5') !== '1') {
-              sessionStorage.setItem('msj_sw_reloaded_v5', '1');
+            if (sessionStorage.getItem('msj_sw_reloaded_v7') !== '1') {
+              sessionStorage.setItem('msj_sw_reloaded_v7', '1');
               window.location.reload();
+            }
+          } else if (ev.data && ev.data.type === 'ACCEPT_CALL_VIA_NOTIF') {
+            if (this.incomingOffer) {
+              await this.acceptIncomingCall();
+            }
+          } else if (ev.data && ev.data.type === 'OPEN_CONVERSATION') {
+            if (ev.data.conversationId) {
+              await this.openConversation(ev.data.conversationId);
             }
           }
         });
-        const reg = await navigator.serviceWorker.register('/sw.js?v=7.0');
+        const reg = await navigator.serviceWorker.register('/sw.js?v=7.1');
         reg.update().catch(() => {});
         if (this.token && reg.active) {
           reg.active.postMessage({ type: 'SET_BG_TOKEN', token: this.token });
@@ -295,6 +303,41 @@ const App = {
     }
   },
 
+  startBackgroundKeepAlive() {
+    if (this._keepAliveRunning) return;
+    this._keepAliveRunning = true;
+    try {
+      const audioEl = document.getElementById('bg-keepalive-audio');
+      if (audioEl) {
+        // Ultra hafif sessiz WAV ses döngüsü — Mobil tarayıcıların sekmeyi ve arka plan soketini uyutmasını engeller
+        audioEl.src = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
+        audioEl.volume = 0.001;
+        const playPromise = audioEl.play();
+        if (playPromise) {
+          playPromise.catch(() => {
+            const unlock = () => {
+              audioEl.play().catch(() => {});
+              window.removeEventListener('click', unlock);
+              window.removeEventListener('touchstart', unlock);
+            };
+            window.addEventListener('click', unlock, { once: true });
+            window.addEventListener('touchstart', unlock, { once: true });
+          });
+        }
+      }
+    } catch {}
+
+    // Arka planda WebSocket bağlantısının kopup kopmadığını periyodik kontrol et
+    if (this._bgKeepAliveInterval) clearInterval(this._bgKeepAliveInterval);
+    this._bgKeepAliveInterval = setInterval(() => {
+      if (this.token) {
+        if (!this.ws || this.ws.readyState === WebSocket.CLOSED || this.ws.readyState === WebSocket.CLOSING) {
+          this.connectWebSocket();
+        }
+      }
+    }, 15000);
+  },
+
   // --- 1 & 2. CEP TELEFONU REHBERİNDEN KİŞİ EKLEME VE SMS / WHATSAPP DAVET SİSTEMİ ---
   _lookupTimeout: null,
 
@@ -303,12 +346,19 @@ const App = {
     const phoneInput = document.getElementById('contact-phone-input');
     const bulkEl = document.getElementById('bulk-contacts-input');
     const statusEl = document.getElementById('contact-lookup-status');
+    const httpsBanner = document.getElementById('https-required-banner');
+
     if (nameInput) nameInput.value = '';
     if (phoneInput) phoneInput.value = '';
     if (bulkEl) bulkEl.value = '';
     if (statusEl) {
       statusEl.style.display = 'none';
       statusEl.innerHTML = '';
+    }
+
+    if (httpsBanner) {
+      const isSecure = window.isSecureContext || location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+      httpsBanner.classList.toggle('hidden', Boolean(isSecure));
     }
 
     const modal = document.getElementById('contact-modal');
@@ -384,6 +434,13 @@ const App = {
   },
 
   importFromPhoneContactsApi(multiple = false) {
+    const isSecure = window.isSecureContext || location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+    if (!isSecure) {
+      this.toast('🔒 Telefon rehberine erişmek için Chrome güvenli HTTPS bağlantısı gerektirir. Güvenli HTTPS adresine yönlendiriliyorsunuz...', 'info');
+      setTimeout(() => this.switchToHttpsForContacts(), 1200);
+      return;
+    }
+
     // ÖNEMLİ: Kullanıcı dokunma izninin (User Gesture) kaybolmaması için
     // navigator.contacts.select() çağrısı önünde hiçbir await kullanılmamalıdır!
     if (navigator.contacts && typeof navigator.contacts.select === 'function') {
@@ -412,7 +469,7 @@ const App = {
             if (modal && modal.classList.contains('hidden')) {
               this.openContactModal();
             }
-            this.toast('⚠️ Numara seçilmedi: Cem ORTİ (+2 numara) gibi birden fazla numarası olan kişilerde kişinin üzerine dokunup numarayı seçtikten sonra Bitti\'ye basın. Veya aşağıdaki kutucuğa adı ve numarayı yazıp 1 saniyede kaydedebilirsiniz.', 'error');
+            this.toast('ℹ️ Rehberden kişi seçimi yapılmadı veya iptal edildi.', 'info');
             return;
           }
           await this.processPickedPhoneContacts(selected);
@@ -423,7 +480,7 @@ const App = {
             this.openContactModal();
           }
           if (err && (err.name === 'AbortError' || /cancel/i.test(err.message || ''))) {
-            this.toast('⚠️ Numara seçilmedi: Cem ORTİ (+2 numara) gibi birden fazla numarası olan kişilerde kişinin üzerine dokunup numarayı seçtikten sonra Bitti\'ye basın. Veya aşağıdaki kutucuğa adı ve numarayı yazıp 1 saniyede kaydedebilirsiniz.', 'error');
+            this.toast('ℹ️ Rehber seçimi iptal edildi.', 'info');
             return;
           }
           this.toast('📱 ' + (err && err.message ? err.message : 'Rehber seçici açılamadı. Lütfen numara yazarak ekleyin.'));
@@ -634,15 +691,90 @@ const App = {
     }
   },
 
+  showSelectPhoneNumberModal(contactName, phoneList, onSelectCallback) {
+    this.pendingPhoneSelectionCallback = onSelectCallback;
+    const titleEl = document.getElementById('select-phone-title');
+    const descEl = document.getElementById('select-phone-desc');
+    const listEl = document.getElementById('select-phone-list');
+
+    if (titleEl) {
+      titleEl.textContent = `📱 ${contactName || 'Kişi'} — Numara Seçimi`;
+    }
+    if (descEl) {
+      descEl.textContent = `"${contactName}" kişisine ait ${phoneList.length} farklı telefon numarası bulundu. Lütfen uygulamaya eklemek istediğiniz numarayı seçin:`;
+    }
+
+    if (listEl) {
+      listEl.innerHTML = phoneList.map((rawPhone, idx) => {
+        const norm = this.normalizePhoneClient(rawPhone);
+        const disp = this.formatPhoneDisplayClient(rawPhone);
+        const digits = (norm || rawPhone).replace(/\D/g, '');
+        const isMobile = /(?:^\+?90|^0)?5\d{8}/.test(digits);
+        const tag = isMobile ? '📱 Cep / Mobil' : '☎️ Sabit / Diğer';
+        return `
+          <label style="display:flex;align-items:center;gap:12px;padding:12px;background:var(--bg-input);border:1px solid var(--border-color);border-radius:10px;cursor:pointer;transition:background 0.2s;">
+            <input type="radio" name="chosen_phone_radio" value="${rawPhone}" ${idx === 0 ? 'checked' : ''} style="width:18px;height:18px;accent-color:var(--primary-color);" />
+            <div style="flex:1;">
+              <div style="font-weight:600;font-size:14px;color:var(--text-main);display:flex;align-items:center;justify-content:space-between;">
+                <span>${disp}</span>
+                <span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:4px;background:${isMobile ? '#065f46;color:#34d399;' : 'var(--bg-hover);color:var(--text-muted);'}">${tag}</span>
+              </div>
+              <div style="font-size:12px;color:var(--text-muted);margin-top:2px;">${contactName}</div>
+            </div>
+          </label>
+        `;
+      }).join('') + `
+        <label style="display:flex;align-items:center;gap:12px;padding:12px;background:var(--bg-input);border:1px dashed var(--primary-color);border-radius:10px;cursor:pointer;transition:background 0.2s;">
+          <input type="radio" name="chosen_phone_radio" value="__ALL__" style="width:18px;height:18px;accent-color:var(--primary-color);" />
+          <div style="flex:1;">
+            <div style="font-weight:600;font-size:14px;color:var(--primary-color);">
+              👥 Tüm Numaraları Ayrı Ayrı Ekle (${phoneList.length} Numara)
+            </div>
+            <div style="font-size:12px;color:var(--text-muted);margin-top:2px;">
+              Her iki numara için de ayrı kişi ve sohbet kaydı oluşturulur
+            </div>
+          </div>
+        </label>
+      `;
+    }
+
+    const modal = document.getElementById('select-phone-modal');
+    if (modal) {
+      modal.classList.remove('hidden');
+    }
+  },
+
+  confirmSelectedPhoneNumber() {
+    const listEl = document.getElementById('select-phone-list');
+    if (!listEl) return;
+    const checked = listEl.querySelector('input[name="chosen_phone_radio"]:checked');
+    if (!checked) {
+      this.toast('Lütfen eklemek istediğiniz numarayı seçin.', 'error');
+      return;
+    }
+
+    const chosenVal = checked.value;
+    const modal = document.getElementById('select-phone-modal');
+    if (modal) modal.classList.add('hidden');
+
+    if (typeof this.pendingPhoneSelectionCallback === 'function') {
+      const cb = this.pendingPhoneSelectionCallback;
+      this.pendingPhoneSelectionCallback = null;
+      cb(chosenVal);
+    }
+  },
+
   async processPickedPhoneContacts(selected) {
     try {
       const list = Array.isArray(selected) ? selected : Array.from(selected || []);
-      const formatted = [];
-      const seenNormPhones = new Set();
+      if (list.length === 0) {
+        this.toast('⚠️ Rehberden kişi seçilmedi.', 'error');
+        return;
+      }
 
+      const parsedItems = [];
       for (const c of list) {
         if (!c) continue;
-        // ContactInfo getter özelliklerini doğrudan oku
         const names = c.name ? (Array.isArray(c.name) ? c.name : Array.from(c.name)) : [];
         const tels = c.tel ? (Array.isArray(c.tel) ? c.tel : Array.from(c.tel)) : [];
 
@@ -656,50 +788,117 @@ const App = {
           .filter(Boolean)
           .join(' ') || String(c.displayName || '').trim();
 
-        const cleanPhones = tels
-          .map((p) => {
-            if (p && typeof p === 'object') {
-              p = p.value || p.number || p.tel || p.phone || '';
-            }
-            return String(p || '').replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, '').trim();
-          })
-          .filter(Boolean);
+        const cleanPhones = [];
+        const seen = new Set();
+        for (let p of tels) {
+          if (p && typeof p === 'object') {
+            p = p.value || p.number || p.tel || p.phone || '';
+          }
+          const str = String(p || '').replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, '').trim();
+          const norm = this.normalizePhoneClient(str);
+          if (str && (!norm || !seen.has(norm))) {
+            if (norm) seen.add(norm);
+            cleanPhones.push(str);
+          }
+        }
 
-        // Eğer birden fazla numara varsa (+2 tane daha vb.) mobil numarayı (05... veya +905...) önceliklendir
-        if (cleanPhones.length > 1) {
-          cleanPhones.sort((a, b) => {
+        parsedItems.push({ cleanName, cleanPhones });
+      }
+
+      // Durum 1: Tek kişi seçildi ve birden fazla numarası var -> KULLANICIYA SEÇİM HAKKI VER!
+      if (parsedItems.length === 1 && parsedItems[0].cleanPhones.length > 1) {
+        const item = parsedItems[0];
+        this.showSelectPhoneNumberModal(item.cleanName || 'Kişi', item.cleanPhones, async (chosen) => {
+          const finalFormatted = [];
+          if (chosen === '__ALL__') {
+            item.cleanPhones.forEach((p, idx) => {
+              finalFormatted.push({
+                name: item.cleanName ? `${item.cleanName} (${idx + 1})` : this.formatPhoneDisplayClient(p),
+                phone: p
+              });
+            });
+          } else {
+            finalFormatted.push({
+              name: item.cleanName || this.formatPhoneDisplayClient(chosen),
+              phone: chosen
+            });
+          }
+          await this.finishContactsImport(finalFormatted);
+        });
+        return;
+      }
+
+      // Durum 2: Seçilen kişide hiç numara bulunamadıysa -> Adı forma doldur ve numara girmesini iste
+      if (parsedItems.length === 1 && parsedItems[0].cleanPhones.length === 0) {
+        const item = parsedItems[0];
+        const modal = document.getElementById('contact-modal');
+        if (modal) modal.classList.remove('hidden');
+        const nameInput = document.getElementById('contact-name-input');
+        const phoneInput = document.getElementById('contact-phone-input');
+        if (nameInput && item.cleanName) nameInput.value = item.cleanName;
+        if (phoneInput) {
+          phoneInput.value = '';
+          phoneInput.focus();
+        }
+        this.toast(`ℹ️ "${item.cleanName || 'Kişi'}" için rehberde kayıtlı telefon numarası bulunamadı. Lütfen numarasını yazıp 'Kişiyi Kaydet'e basın.`, 'info');
+        return;
+      }
+
+      // Durum 3: Tek kişi tek numaralı veya toplu seçim (birden çok kişi)
+      const finalFormatted = [];
+      const seenDedup = new Set();
+      for (const item of parsedItems) {
+        if (item.cleanPhones.length === 0) {
+          if (item.cleanName) {
+            finalFormatted.push({ name: item.cleanName, phone: '' });
+          }
+        } else if (item.cleanPhones.length === 1) {
+          const p = item.cleanPhones[0];
+          const norm = this.normalizePhoneClient(p) || p;
+          const k = `${item.cleanName.toLowerCase()}|${norm}`;
+          if (!seenDedup.has(k)) {
+            seenDedup.add(k);
+            finalFormatted.push({
+              name: item.cleanName || this.formatPhoneDisplayClient(p),
+              phone: p
+            });
+          }
+        } else {
+          // Toplu seçimde birden fazla numara varsa mobil olanı önceliklendir
+          item.cleanPhones.sort((a, b) => {
             const aIsMob = /(?:^\+?90|^0)?5\d{8}/.test(a.replace(/\D/g, ''));
             const bIsMob = /(?:^\+?90|^0)?5\d{8}/.test(b.replace(/\D/g, ''));
             if (aIsMob && !bIsMob) return -1;
             if (!aIsMob && bIsMob) return 1;
             return 0;
           });
-        }
-
-        if (cleanPhones.length > 0) {
-          const tel = cleanPhones[0];
-          const norm = this.normalizePhoneClient(tel) || tel;
-          const dedupKey = `${cleanName.toLowerCase()}|${norm}`;
-          if (!seenNormPhones.has(dedupKey)) {
-            seenNormPhones.add(dedupKey);
-            formatted.push({
-              name: cleanName || this.formatPhoneDisplayClient(tel),
-              phone: tel
+          const p = item.cleanPhones[0];
+          const norm = this.normalizePhoneClient(p) || p;
+          const k = `${item.cleanName.toLowerCase()}|${norm}`;
+          if (!seenDedup.has(k)) {
+            seenDedup.add(k);
+            finalFormatted.push({
+              name: item.cleanName || this.formatPhoneDisplayClient(p),
+              phone: p
             });
           }
-        } else if (cleanName) {
-          formatted.push({
-            name: cleanName,
-            phone: ''
-          });
         }
       }
 
-      if (formatted.length === 0) {
-        this.toast('⚠️ Seçilen kişide geçerli isim veya telefon numarası bulunamadı.', 'error');
+      if (finalFormatted.length === 0) {
+        this.toast('⚠️ Seçilen kişilerde geçerli isim veya numara bulunamadı.', 'error');
         return;
       }
 
+      await this.finishContactsImport(finalFormatted);
+    } catch (err) {
+      console.error('Rehber işleme hatası:', err);
+      this.toast('❌ Rehber işleme hatası: ' + (err.message || 'Bilinmeyen hata'), 'error');
+    }
+  },
+
+  async finishContactsImport(formatted) {
+    try {
       // 1. ANINDA OPTİMİSTİK KAYIT (0ms GECİKME - KULLANICI ASLA BEKLEMEZ)
       const optimistic = this.buildOptimisticContacts(formatted);
       this.applyOptimisticContactsToUi(optimistic);
@@ -720,7 +919,7 @@ const App = {
       this.renderSidebar();
       this.toast(`✅ ${optimistic.length} kişi (${optimistic.map((x) => x.display_name).join(', ')}) rehberinize eklendi!`);
 
-      // Davet modalını da aç
+      // Davet modalını aç
       this.openInviteModal({
         importedCount: optimistic.length,
         contacts: optimistic,
@@ -731,8 +930,8 @@ const App = {
       localStorage.setItem('msj_pending_phone_import', JSON.stringify(formatted));
       await this.flushPendingPhoneImport();
     } catch (err) {
-      console.error('Rehber aktarım hatası:', err);
-      this.toast('❌ Rehber aktarım hatası: ' + (err.message || 'Bilinmeyen hata'), 'error');
+      console.error('Kişi kaydetme hatası:', err);
+      this.toast('❌ Kişi kaydetme hatası: ' + (err.message || 'Bilinmeyen hata'), 'error');
     }
   },
 
@@ -1142,6 +1341,37 @@ const App = {
     this.checkBackgroundBannerState();
     this.syncServiceWorkerToken();
     this.connectWebSocket();
+    this.startBackgroundKeepAlive();
+
+    // Kullanıcı henüz karar vermediyse bildirim ve arka plan izni iste
+    if ('Notification' in window && Notification.permission === 'default') {
+      try {
+        Notification.requestPermission().then(() => this.syncServiceWorkerToken()).catch(() => {});
+      } catch {}
+    }
+
+    // URL parametreleriyle gelen çağrı veya sohbet açma kontrolü (?answerCall=xxx, ?convId=xxx)
+    try {
+      const urlParams = new URLSearchParams(window.location.search);
+      const answerCallId = urlParams.get('answerCall');
+      const convIdParam = urlParams.get('convId');
+      if (answerCallId) {
+        setTimeout(async () => {
+          try {
+            const res = await this.api(`/api/calls/active?callId=${encodeURIComponent(answerCallId)}`);
+            if (res && res.call) {
+              await this.handleIncomingCallOffer(res.call);
+              await this.acceptIncomingCall();
+            }
+          } catch {}
+        }, 600);
+      }
+      if (convIdParam) {
+        setTimeout(() => {
+          this.selectConversation(convIdParam);
+        }, 300);
+      }
+    } catch {}
 
     await Promise.all([
       this.loadConversations(),
@@ -1149,12 +1379,20 @@ const App = {
       this.loadStories()
     ]);
 
-    if (this.conversations.length > 0 && window.innerWidth > 860) {
+    const urlParamsCheck = new URLSearchParams(window.location.search);
+    const targetConvId = urlParamsCheck.get('convId');
+    if (targetConvId) {
+      this.selectConversation(targetConvId);
+    } else if (this.conversations.length > 0 && window.innerWidth > 860) {
       this.selectConversation(this.conversations[0].id);
     } else {
       document.getElementById('empty-chat-state').classList.remove('hidden');
       document.getElementById('active-chat-view').classList.add('hidden');
     }
+  },
+
+  async openConversation(convId) {
+    return this.selectConversation(convId);
   },
 
   updateMyHeader() {
@@ -1234,20 +1472,30 @@ const App = {
         }
       } else if (ev.message.senderId !== this.user.id) {
         this.playBeep(580, 0.12);
+        if ('vibrate' in navigator) {
+          try { navigator.vibrate([200, 100, 200]); } catch {}
+        }
         const notifText = this.user.privacy_hide_notif_content
           ? '🔒 Yeni şifreli mesajınız var'
           : `${ev.message.senderName}: ${ev.message.content || 'Yeni mesaj'}`;
         this.toast(notifText);
 
-        if (document.hidden && 'serviceWorker' in navigator && Notification.permission === 'granted') {
-          const reg = await navigator.serviceWorker.ready;
-          if (reg.active) {
-            reg.active.postMessage({
-              type: 'SHOW_LOCAL_NOTIFICATION',
-              title: `💬 ${ev.message.senderName}`,
-              body: ev.message.content || '🔒 Yeni şifreli mesaj'
-            });
-          }
+        if ('serviceWorker' in navigator && Notification.permission === 'granted') {
+          try {
+            const reg = await navigator.serviceWorker.ready;
+            if (reg.active) {
+              reg.active.postMessage({
+                type: 'SHOW_LOCAL_NOTIFICATION',
+                title: `💬 ${ev.message.senderName}`,
+                body: this.user.privacy_hide_notif_content ? '🔒 Yeni şifreli mesaj' : (ev.message.content || 'Yeni mesaj'),
+                tag: 'msj_' + ev.message.id,
+                payload: {
+                  type: 'new-message',
+                  conversationId: ev.conversationId
+                }
+              });
+            }
+          } catch {}
         }
       }
       return;
@@ -2715,6 +2963,13 @@ const App = {
           this.playBeep(mode === 'incoming' ? 660 : 480, 0.25);
         }
       }, 300);
+
+      // Gelen aramalarda güçlü telefon titreşimi
+      if (mode === 'incoming' && 'vibrate' in navigator) {
+        try {
+          navigator.vibrate([500, 200, 500, 200, 500]);
+        } catch {}
+      }
     };
     playPattern();
     this.callRingInterval = setInterval(playPattern, 2400);
@@ -2724,6 +2979,11 @@ const App = {
     if (this.callRingInterval) {
       clearInterval(this.callRingInterval);
       this.callRingInterval = null;
+    }
+    if ('vibrate' in navigator) {
+      try {
+        navigator.vibrate(0);
+      } catch {}
     }
   },
 
@@ -3134,15 +3394,27 @@ const App = {
     this.webrtcVideoReceived = false;
     this.startRingTone('incoming');
 
-    if (document.hidden && 'serviceWorker' in navigator && Notification.permission === 'granted') {
-      const reg = await navigator.serviceWorker.ready;
-      if (reg.active) {
-        reg.active.postMessage({
-          type: 'SHOW_LOCAL_NOTIFICATION',
-          title: `📞 Gelen Arama: ${ev.fromDisplayName || 'Kişi'}`,
-          body: ev.callType === 'video' ? '📹 Görüntülü Arama Geliyor — Cevaplamak için dokunun' : '📞 Sesli Arama Geliyor — Cevaplamak için dokunun'
-        });
-      }
+    // Her durumda Service Worker'a bildirim gönder (özellikle arka planda veya ekran kilitliyken cevapla/reddet butonlu)
+    if ('serviceWorker' in navigator && Notification.permission === 'granted') {
+      try {
+        const reg = await navigator.serviceWorker.ready;
+        if (reg.active) {
+          reg.active.postMessage({
+            type: 'SHOW_LOCAL_NOTIFICATION',
+            title: `📞 GELEN ARAMA: ${ev.fromDisplayName || 'Biri Arıyor'}`,
+            body: (ev.callType === 'video' ? '📹 Görüntülü Arama' : '📞 Sesli Arama') + ' Geliyor — Yanıtlamak için dokunun',
+            tag: 'call_' + (ev.callId || Date.now()),
+            payload: {
+              type: 'incoming-call',
+              callId: ev.callId || '',
+              conversationId: ev.conversationId,
+              callerId: ev.fromUserId,
+              callerName: ev.fromDisplayName,
+              callType: ev.callType
+            }
+          });
+        }
+      } catch {}
     }
 
     document.getElementById('call-overlay').classList.remove('hidden');

@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- BUILD_VER: 700 -->
+<!-- BUILD_VER: 710 -->
 <html lang="tr" data-theme="dark">
 <head>
   <meta charset="UTF-8" />
@@ -12,7 +12,7 @@
   <link rel="manifest" href="/manifest.json" />
   <link rel="icon" type="image/svg+xml" href="/icon.svg" />
   <link rel="apple-touch-icon" href="/icon.svg" />
-  <link rel="stylesheet" href="/style.css?v=7.0" />
+  <link rel="stylesheet" href="/style.css?v=7.1" />
 </head>
 <body>
   <!-- Bildirim Toast Alanı -->
@@ -341,8 +341,15 @@
         <!-- 2. CEP TELEFONU REHBERİNDEN AKTAR (MOBİL CHROME CONTACT PICKER & VCF) -->
         <div style="background:var(--bg-header);padding:14px;border-radius:12px;border:1px solid var(--border-color);display:flex;flex-direction:column;gap:8px;">
           <h4 style="margin:0;font-size:14px;color:#38bdf8;">📱 2. Telefon Rehberinden Kişi Aktar</h4>
+          <div id="https-required-banner" class="hidden" style="background:#451a03;border:1px solid #d97706;border-radius:8px;padding:10px;font-size:12px;color:#fbbf24;">
+            <strong>🔒 Güvenli Bağlantı (HTTPS) Gerekli</strong><br>
+            Android telefon rehberini açabilmek için tarayıcı HTTPS güvenlik protokolü istemektedir.
+            <button type="button" class="btn btn-warning btn-sm" style="margin-top:6px;width:100%;font-size:12px;padding:6px;font-weight:700;" onclick="App.switchToHttpsForContacts()">
+              🔐 Güvenli HTTPS Adresine Geç (Rehber İçin)
+            </button>
+          </div>
           <p style="font-size:11.5px;color:var(--text-muted);margin:0;line-height:1.45;">
-            💡 <em>İpucu: Android rehberinde birden fazla numarası olan kişilerde (örn: + 2 tane daha), kişinin üzerine dokunup numarayı seçtikten sonra sağ üstteki 'Bitti' butonuna basın.</em>
+            💡 <em>İpucu: Birden fazla numarası olan kişilerde eklemek istediğiniz numarayı seçebilir veya tüm numaraları tek dokunuşla ekleyebilirsiniz.</em>
           </p>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:4px;">
             <button type="button" class="btn btn-primary btn-sm" onclick="App.importFromPhoneContactsApi(false)">
@@ -398,6 +405,28 @@
 
         <div class="modal-footer">
           <button type="button" class="btn btn-primary" onclick="App.closeModal('invite-modal')">Tamam</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Birden Fazla Numarası Olan Kişiler İçin Numara Seçim Modalı -->
+  <div id="select-phone-modal" class="modal-backdrop hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3 id="select-phone-title">📱 Telefon Numarası Seçimi</h3>
+        <button class="icon-btn" onclick="App.closeModal('select-phone-modal')">✕</button>
+      </div>
+      <div class="modal-body">
+        <p id="select-phone-desc" style="font-size:13px;color:var(--text-muted);margin-bottom:12px;">
+          Bu kişiye ait birden fazla numara bulundu. Lütfen uygulamaya eklemek istediğiniz numarayı seçin:
+        </p>
+        <div id="select-phone-list" style="display:flex;flex-direction:column;gap:8px;margin-bottom:14px;max-height:220px;overflow-y:auto;">
+          <!-- Numaralar dinamik olarak buraya eklenecek -->
+        </div>
+        <div style="display:flex;gap:8px;">
+          <button type="button" class="btn btn-secondary btn-sm" style="flex:1;" onclick="App.closeModal('select-phone-modal')">Vazgeç</button>
+          <button type="button" class="btn btn-primary btn-sm" style="flex:1;" onclick="App.confirmSelectedPhoneNumber()">💾 Seçilen Numarayı Ekle</button>
         </div>
       </div>
     </div>
@@ -679,7 +708,11 @@
   <!-- WhatsApp & Telegram Tarzı Hızlı Yeni Sohbet / Kişi Ekle Yüzen Butonu (FAB) -->
   <button id="global-fab-btn" class="fab-btn" onclick="App.openContactModal()" title="Yeni Sohbet Başlat / Kişi Ekle">💬+</button>
 
-  <script src="/crypto-e2ee.js?v=7.0"></script>
-  <script src="/app.js?v=7.0"></script>
+  <!-- Arka Planda Canlı Tutma & Zil Sesi Ses Öğeleri -->
+  <audio id="bg-keepalive-audio" loop playsinline class="hidden"></audio>
+  <audio id="ringtone-audio" loop playsinline class="hidden"></audio>
+
+  <script src="/crypto-e2ee.js?v=7.1"></script>
+  <script src="/app.js?v=7.1"></script>
 </body>
 </html>

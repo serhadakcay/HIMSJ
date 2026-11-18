@@ -206,6 +206,7 @@ const MIME_TYPES = {
 // --- Aktif WebSocket Bağlantıları ve Arka Plan Heartbeat Takibi ---
 const onlineClients = new Map();
 const backgroundHeartbeats = new Map(); // userId -> timestamp (ms)
+const activeIncomingCalls = new Map(); // callId -> { callId, callerId, callerName, callerAvatar, callType, conversationId, targetUserId, sdp, status, createdAt }
 
 function isUserOnline(userId) {
   const set = onlineClients.get(userId);
@@ -1246,8 +1247,7 @@ async function handleRequest(req, res) {
           broadcastPresence(auth.id, true);
         }
 
-        const rawSince = parsedUrl.searchParams.get('since') || new Date(Date.now() - 30000).toISOString();
-        const sqliteSince = rawSince.replace('T', ' ').replace('Z', '').slice(0, 19);
+        // 1. Okunmamış mesajlar (Saat farkı ve gecikmeleri önlemek için doğrudan okunmamış kayıtlar kontrol edilir)
         const unreadMessages = db.prepare(`
           SELECT m.id, m.conversation_id, m.msg_type, m.content, m.created_at,
                  u.display_name as sender_name
@@ -1257,16 +1257,64 @@ async function handleRequest(req, res) {
           WHERE m.sender_id != ?
             AND m.status != 'read'
             AND m.deleted_at IS NULL
-            AND datetime(m.created_at) >= datetime(?)
           ORDER BY m.created_at DESC
-          LIMIT 5
-        `).all(auth.id, auth.id, sqliteSince);
+          LIMIT 10
+        `).all(auth.id, auth.id);
+
+        // 2. Aktif çalan gelen aramalar
+        const now = Date.now();
+        const incomingCalls = [];
+        for (const [cId, call] of activeIncomingCalls.entries()) {
+          if (now - call.createdAt > 45000) {
+            activeIncomingCalls.delete(cId);
+            continue;
+          }
+          if (call.targetUserId === auth.id && call.status === 'ringing') {
+            incomingCalls.push({
+              callId: call.callId,
+              callerId: call.callerId,
+              callerName: call.callerName,
+              callerAvatar: call.callerAvatar,
+              callType: call.callType,
+              conversationId: call.conversationId,
+              sdp: call.sdp,
+              createdAt: call.createdAt
+            });
+          }
+        }
 
         return sendJson(res, 200, {
           ok: true,
           serverTime: new Date().toISOString(),
-          unreadMessages
+          unreadMessages,
+          incomingCalls
         });
+      }
+
+      // Arka plandaki arama reddetme uç noktası
+      if (pathname === '/api/calls/reject' && req.method === 'POST') {
+        const body = await readJsonBody(req);
+        const callId = body.callId;
+        if (callId && activeIncomingCalls.has(callId)) {
+          const call = activeIncomingCalls.get(callId);
+          activeIncomingCalls.delete(callId);
+          sendToUser(call.callerId, {
+            type: 'call-reject',
+            callId,
+            fromUserId: auth.id,
+            fromDisplayName: auth.display_name
+          });
+        }
+        return sendJson(res, 200, { ok: true });
+      }
+
+      // Aktif arama sorgulama
+      if (pathname === '/api/calls/active' && req.method === 'GET') {
+        const callId = parsedUrl.searchParams.get('callId');
+        if (callId && activeIncomingCalls.has(callId)) {
+          return sendJson(res, 200, { ok: true, call: activeIncomingCalls.get(callId) });
+        }
+        return sendJson(res, 404, { error: 'Arama bulunamadı veya sona erdi.' });
       }
 
       if (pathname === '/api/auth/background-permission' && req.method === 'POST') {
@@ -2381,8 +2429,10 @@ function handleWsMessage(client, msg) {
       'call-media'
     ].includes(msg.type)
   ) {
+    const callId = msg.callId || ('call_' + Date.now() + '_' + crypto.randomBytes(4).toString('hex'));
     const payload = {
       ...msg,
+      callId,
       fromUserId: client.userId,
       fromDisplayName: client.displayName
     };
@@ -2399,6 +2449,29 @@ function handleWsMessage(client, msg) {
         }
       }
     }
+
+    if (msg.type === 'call-offer') {
+      for (const uid of targetSet) {
+        activeIncomingCalls.set(callId, {
+          callId,
+          callerId: client.userId,
+          callerName: client.displayName,
+          callerAvatar: client.avatarColor || '#10b981',
+          callType: msg.callType || 'audio',
+          conversationId: msg.conversationId,
+          targetUserId: uid,
+          sdp: msg.sdp,
+          status: 'ringing',
+          createdAt: Date.now()
+        });
+      }
+    } else if (msg.type === 'call-answer') {
+      const rec = activeIncomingCalls.get(msg.callId || callId);
+      if (rec) rec.status = 'answered';
+    } else if (['call-reject', 'call-end', 'call-busy'].includes(msg.type)) {
+      activeIncomingCalls.delete(msg.callId || callId);
+    }
+
     for (const uid of targetSet) {
       sendToUser(uid, payload);
     }
