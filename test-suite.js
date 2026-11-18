@@ -162,7 +162,27 @@ async function runTests() {
     assert(hasIntegrationMsg, 'Otomatik numara entegrasyon sistem mesajı oluşturulmalı');
     console.log('[OK] 6. Kaydedilen kişiler programı kullandığında numaralarla otomatik entegrasyon testi başarılı.');
 
-    // 7. Mesaj gönderme ve Arka Plan Bildirim Yoklama (SQLite zaman damgası uyumu)
+    // 7. Mesaj gönderme, Web Push (VAPID) ve Arka Plan Bildirim Yoklama (Program Kapalıyken Bildirim)
+    const vapidRes = await req('/api/push/vapid-public-key', 'GET');
+    assert.strictEqual(vapidRes.status, 200);
+    assert(vapidRes.data.publicKey && vapidRes.data.publicKey.length > 40, 'VAPID public key üretilmeli');
+
+    const subRes = await req(
+      '/api/push/subscribe',
+      'POST',
+      {
+        subscription: {
+          endpoint: 'https://fcm.googleapis.com/fcm/send/test-endpoint-kaan',
+          keys: {
+            p256dh: Buffer.alloc(65, 4).toString('base64url'),
+            auth: Buffer.alloc(16, 1).toString('base64url')
+          }
+        }
+      },
+      tokenKaan
+    );
+    assert.strictEqual(subRes.status, 200);
+
     const sendMsgRes = await req(
       `/api/conversations/${sharedConvId}/messages`,
       'POST',
@@ -183,9 +203,55 @@ async function runTests() {
     );
     assert.strictEqual(pollRes.status, 200);
     assert(pollRes.data.unreadMessages.length >= 1, 'Arka plan bildirim yoklaması yeni mesajı yakalamalı');
-    console.log('[OK] 7. Mesajlaşma ve arka plan bildirim yoklama testi başarılı.');
+    console.log('[OK] 7. Program kapalıyken Web Push + arka plan mesaj bildirim yoklama testi başarılı.');
+
+    // 8. Cem Orti Giriş Yaptığında Diğer Kullanıcıların Cem Orti Olmaması & Kendi Adıyla Doğrudan Kalıcı Giriş Testi
+    const loginCem = await req('/api/auth/login', 'POST', {
+      username: 'Cem Orti',
+      phone: '0542 383 26 63'
+    });
+    assert.strictEqual(loginCem.status, 200);
+    assert.strictEqual(loginCem.data.user.display_name, 'Cem Orti', 'Cem Orti kendi adıyla doğrudan giriş yapabilmeli');
+
+    const loginAhmet = await req('/api/auth/login', 'POST', {
+      username: 'Ahmet Yılmaz'
+    });
+    assert.strictEqual(loginAhmet.status, 200);
+    assert.strictEqual(loginAhmet.data.user.display_name, 'Ahmet Yılmaz', 'Her kullanıcı kayıt sekmesine gitmeden kendi adıyla doğrudan giriş yapabilmeli');
+
+    // Sunucu yeniden başlatma simülasyonu (sessions tablosu sıfırlansa ve Cem Orti son kullanıcı olsa bile):
+    db.exec('DELETE FROM sessions');
+
+    // Profil bilgisi olmayan rastgele bir token ASLA Cem Orti'ye bağlanmamalı!
+    const randomHexToken = 'a'.repeat(64);
+    const pollUnknown = await req(`/api/notifications/poll?token=${randomHexToken}`, 'GET');
+    assert.strictEqual(pollUnknown.status, 401, 'Profil bilgisi olmayan bilinmeyen token Cem Orti hesabına bağlanmamalı');
+
+    // Kaan'ın cihazı kendi X-User-Profile başlığı ile istek attığında Kaan olarak kalmalı (asla Cem Orti olmamalı!)
+    const kaanProfileB64 = Buffer.from(
+      encodeURIComponent(
+        JSON.stringify({
+          id: regKaan.data.user.id,
+          username: regKaan.data.user.username,
+          display_name: 'Kaan Yıldız',
+          phone: '0532 111 22 33'
+        })
+      ).replace(/%([0-9A-F]{2})/g, (_, p1) => String.fromCharCode(parseInt(p1, 16))),
+      'latin1'
+    ).toString('base64');
+
+    const meKaanRes = await fetch(`${BASE_URL}/api/auth/me`, {
+      headers: {
+        Authorization: `Bearer ${tokenKaan}`,
+        'X-User-Profile': kaanProfileB64
+      }
+    });
+    const meKaanData = await meKaanRes.json();
+    assert.strictEqual(meKaanRes.status, 200);
+    assert.strictEqual(meKaanData.user.display_name, 'Kaan Yıldız', 'Cem Orti giriş yaptıktan sonra Kaan kendi adıyla kalmalı, Cem Orti olmamalı!');
+    console.log('[OK] 8. Cem Orti giriş yaptığında diğer kullanıcıların kimliği korundu; her kullanıcı kendi adıyla kalıcı giriş yaptı.');
   } finally {
-    // 8. Test bittikten sonra veritabanını tamamen temizle (Madde 4: Database boş olsun)
+    // 9. Test bittikten sonra veritabanını tamamen temizle (Madde 4: Database boş olsun)
     clearAllDatabaseData();
     const finalUsers = db.prepare('SELECT COUNT(*) as cnt FROM users').get().cnt;
     const finalContacts = db.prepare('SELECT COUNT(*) as cnt FROM contacts').get().cnt;
@@ -195,13 +261,13 @@ async function runTests() {
     assert.strictEqual(finalContacts, 0);
     assert.strictEqual(finalConvs, 0);
     assert.strictEqual(finalMsgs, 0);
-    console.log('[OK] 8. Veritabanı temizlendi ve tamamen boş bırakıldı (0 kullanıcı, 0 kişi, 0 mesaj).');
+    console.log('[OK] 9. Veritabanı temizlendi ve tamamen boş bırakıldı (0 kullanıcı, 0 kişi, 0 mesaj).');
 
     httpServer.close();
     if (httpsServer) httpsServer.close();
   }
 
-  console.log('\n=== TUM TESTLER BASARIYLA TAMAMLANDI (8/8 PASS) ===');
+  console.log('\n=== TUM TESTLER BASARIYLA TAMAMLANDI (9/9 PASS) ===');
 }
 
 runTests().catch((err) => {

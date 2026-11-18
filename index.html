@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- BUILD_VER: 710 -->
+<!-- BUILD_VER: 720 -->
 <html lang="tr" data-theme="dark">
 <head>
   <meta charset="UTF-8" />
@@ -12,7 +12,7 @@
   <link rel="manifest" href="/manifest.json" />
   <link rel="icon" type="image/svg+xml" href="/icon.svg" />
   <link rel="apple-touch-icon" href="/icon.svg" />
-  <link rel="stylesheet" href="/style.css?v=7.1" />
+  <link rel="stylesheet" href="/style.css?v=7.2" />
 </head>
 <body>
   <!-- Bildirim Toast Alanı -->
@@ -33,19 +33,22 @@
       </div>
 
       <div class="auth-tabs">
-        <button id="tab-login-btn" class="auth-tab active" onclick="App.switchAuthTab('login')">Giriş Yap</button>
+        <button id="tab-login-btn" class="auth-tab active" onclick="App.switchAuthTab('login')">Kendi Adımla Giriş</button>
         <button id="tab-register-btn" class="auth-tab" onclick="App.switchAuthTab('register')">Yeni Hesap Oluştur</button>
       </div>
 
       <!-- Giriş Formu -->
       <form id="login-form" class="auth-form" onsubmit="App.handleLogin(event)">
-        <label class="field-label">Cep Telefonu Numaranız veya Kullanıcı Adı</label>
-        <input id="login-username" type="text" class="input" placeholder="Örn: 0532 123 45 67 veya kullanici_adi" required autocomplete="username" />
+        <label class="field-label">Adınız Soyadınız (Kendi Adınız) veya Telefon Numaranız</label>
+        <input id="login-username" type="text" class="input" placeholder="Örn: Ahmet Yılmaz veya 0532 123 45 67" required autocomplete="username" />
 
-        <label class="field-label">Parola</label>
-        <input id="login-password" type="password" class="input" placeholder="••••••" required autocomplete="current-password" />
+        <label class="field-label">Cep Telefonu Numaranız (İsteğe Bağlı — Rehber Eşleştirmesi İçin)</label>
+        <input id="login-phone" type="tel" class="input" placeholder="Örn: 0532 123 45 67" autocomplete="tel" />
 
-        <button type="submit" class="btn btn-primary btn-block">🔒 Güvenli Giriş Yap</button>
+        <label class="field-label">Parola (İsteğe Bağlı)</label>
+        <input id="login-password" type="password" class="input" placeholder="Boş bırakabilirsiniz veya parola girin" value="123456" autocomplete="current-password" />
+
+        <button type="submit" class="btn btn-primary btn-block">🔒 Kendi Adımla Giriş Yap (Kalıcı Oturum)</button>
       </form>
 
       <!-- Kayıt Formu -->
@@ -60,7 +63,7 @@
         <input id="reg-username" type="text" class="input" placeholder="Boş bırakırsanız otomatik oluşturulur" autocomplete="username" />
 
         <label class="field-label">Parola</label>
-        <input id="reg-password" type="password" class="input" placeholder="En az 4 karakter" required autocomplete="new-password" />
+        <input id="reg-password" type="password" class="input" placeholder="En az 4 karakter" value="123456" required autocomplete="new-password" />
 
         <button type="submit" class="btn btn-primary btn-block">✨ Numaramla Kaydol ve Başla</button>
       </form>
@@ -712,7 +715,7 @@
   <audio id="bg-keepalive-audio" loop playsinline class="hidden"></audio>
   <audio id="ringtone-audio" loop playsinline class="hidden"></audio>
 
-  <script src="/crypto-e2ee.js?v=7.1"></script>
-  <script src="/app.js?v=7.1"></script>
+  <script src="/crypto-e2ee.js?v=7.2"></script>
+  <script src="/app.js?v=7.2"></script>
 </body>
 </html>

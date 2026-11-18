@@ -296,6 +296,17 @@ function initSchema() {
       FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
       FOREIGN KEY (caller_id) REFERENCES users(id) ON DELETE CASCADE
     );
+
+    -- 12. Arka Plan Web Push Abonelikleri (Program Kapalıyken Mesaj/Arama Bildirimi)
+    CREATE TABLE IF NOT EXISTS push_subscriptions (
+      endpoint TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      p256dh TEXT NOT NULL,
+      auth TEXT NOT NULL,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
   `);
 
   // Mevcut tabloda eksik sütun varsa güvenli migrasyon yap
@@ -332,6 +343,7 @@ function initSchema() {
 
 function clearAllDatabaseData() {
   db.exec(`
+    DELETE FROM push_subscriptions;
     DELETE FROM calls;
     DELETE FROM reports;
     DELETE FROM blocked_users;

@@ -123,6 +123,15 @@ try {
   if (!contactCols.includes('invited_at')) db.exec('ALTER TABLE contacts ADD COLUMN invited_at TEXT');
 
   db.exec(`
+    CREATE TABLE IF NOT EXISTS push_subscriptions (
+      endpoint TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      p256dh TEXT NOT NULL,
+      auth TEXT NOT NULL,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
     DELETE FROM users WHERE id IN ('usr_serhad', 'usr_ayse', 'usr_mehmet', 'usr_zeynep', 'usr_can');
     DELETE FROM conversations WHERE id IN ('conv_proje_ekibi', 'conv_duyuru_kanali', 'conv_dm_ayse');
   `);
@@ -138,9 +147,9 @@ try {
   }
 } catch {}
 
-let getLocalIPs, ensureTlsCertificate, generateQrSvg;
+let getLocalIPs, ensureTlsCertificate, generateQrSvg, ensureVapidKeys, sendWebPushNotification;
 try {
-  ({ getLocalIPs, ensureTlsCertificate, generateQrSvg } = require('./utils'));
+  ({ getLocalIPs, ensureTlsCertificate, generateQrSvg, ensureVapidKeys, sendWebPushNotification } = require('./utils'));
 } catch {
   const os = require('node:os');
   getLocalIPs = () => {
@@ -155,6 +164,8 @@ try {
   };
   ensureTlsCertificate = () => { throw new Error('Bulut modunda yerel sertifika gerekmez'); };
   generateQrSvg = (text, size = 240) => `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="${size}" height="${size}"><rect width="100%" height="100%" fill="#fff"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" font-size="11" fill="#0f172a">${text}</text></svg>`;
+  ensureVapidKeys = () => null;
+  sendWebPushNotification = async () => ({ ok: false, status: 0 });
 }
 
 const HTTP_PORT = Number(process.env.PORT || 3080);
@@ -162,6 +173,7 @@ const HTTPS_PORT = Number(process.env.HTTPS_PORT || 3443);
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const UPLOADS_DIR = path.join(__dirname, 'uploads');
 const CERTS_DIR = path.join(__dirname, 'certs');
+const vapidKeys = typeof ensureVapidKeys === 'function' ? ensureVapidKeys(CERTS_DIR) : null;
 
 if (!fs.existsSync(UPLOADS_DIR)) {
   fs.mkdirSync(UPLOADS_DIR, { recursive: true });
@@ -169,7 +181,7 @@ if (!fs.existsSync(UPLOADS_DIR)) {
 
 // Hız Sınırlama (Rate Limiter)
 const rateBuckets = new Map();
-function checkRateLimit(ip, limit = 360, windowMs = 60000) {
+function checkRateLimit(ip, limit = 600, windowMs = 60000) {
   const now = Date.now();
   let entry = rateBuckets.get(ip);
   if (!entry || now > entry.resetAt) {
@@ -206,7 +218,7 @@ const MIME_TYPES = {
 // --- Aktif WebSocket Bağlantıları ve Arka Plan Heartbeat Takibi ---
 const onlineClients = new Map();
 const backgroundHeartbeats = new Map(); // userId -> timestamp (ms)
-const activeIncomingCalls = new Map(); // callId -> { callId, callerId, callerName, callerAvatar, callType, conversationId, targetUserId, sdp, status, createdAt }
+const activeIncomingCalls = new Map(); // callId -> { callId, callerId, fromUserId, callerName, fromDisplayName, callerAvatar, callType, conversationId, targetUserId, sdp, iceCandidates, status, createdAt }
 
 function isUserOnline(userId) {
   const set = onlineClients.get(userId);
@@ -245,6 +257,26 @@ function sendToUser(userId, payloadObj) {
   for (const client of set) {
     sendWsFrame(client.socket, payloadObj);
   }
+}
+
+async function pushNotifyUser(userId, payloadObj) {
+  if (!userId || !vapidKeys || typeof sendWebPushNotification !== 'function') return;
+  try {
+    const subs = db.prepare('SELECT endpoint, p256dh, auth FROM push_subscriptions WHERE user_id = ?').all(userId);
+    for (const s of subs) {
+      sendWebPushNotification(
+        { endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } },
+        payloadObj,
+        vapidKeys
+      ).then((res) => {
+        if (res && (res.status === 404 || res.status === 410)) {
+          try {
+            db.prepare('DELETE FROM push_subscriptions WHERE endpoint = ?').run(s.endpoint);
+          } catch {}
+        }
+      }).catch(() => {});
+    }
+  } catch {}
 }
 
 function broadcastToConversation(conversationId, payloadObj, excludeUserId = null) {
@@ -340,6 +372,30 @@ function sanitizeUsername(rawUsername, displayName, normPhone) {
 
 const revokedTokens = new Set();
 
+function parseClientProfileFromReq(req) {
+  if (!req) return null;
+  let rawB64 = (req.headers && req.headers['x-user-profile']) || '';
+  if (!rawB64 && req.url) {
+    try {
+      const parsedUrl = new URL(req.url, `http://${(req.headers && req.headers.host) || 'localhost'}`);
+      rawB64 = parsedUrl.searchParams.get('profile') || '';
+    } catch {}
+  }
+  if (!rawB64) return null;
+  try {
+    const latin1Str = Buffer.from(String(rawB64), 'base64').toString('latin1');
+    const jsonStr = decodeURIComponent(escape(latin1Str));
+    const parsed = JSON.parse(jsonStr);
+    if (parsed && typeof parsed === 'object') return parsed;
+  } catch {
+    try {
+      const parsed = JSON.parse(Buffer.from(String(rawB64), 'base64').toString('utf8'));
+      if (parsed && typeof parsed === 'object') return parsed;
+    } catch {}
+  }
+  return null;
+}
+
 function resolveOrRestoreSession(token, req) {
   if (!token || revokedTokens.has(token)) return null;
 
@@ -356,45 +412,49 @@ function resolveOrRestoreSession(token, req) {
       WHERE s.token = ?
     `).get(token);
 
+  const profile = parseClientProfileFromReq(req);
   let session = querySession();
+
   if (session) {
-    db.prepare('UPDATE sessions SET last_active_at = CURRENT_TIMESTAMP WHERE token = ?').run(token);
-    return session;
+    // Eğer istemcinin kendi profili (X-User-Profile) mevcut oturumdaki kullanıcıdan farklıysa
+    // (ör. eski bir oturum çakışması varsa), token'ı istemcinin gerçek sahibine onar!
+    if (profile && (profile.id || profile.username || profile.phone)) {
+      const profId = String(profile.id || '').trim();
+      const profUser = String(profile.username || '').trim().toLowerCase();
+      const profPhone = normalizePhone(profile.phone || '');
+      const idMatches = profId && session.id === profId;
+      const userMatches = profUser && session.username.toLowerCase() === profUser;
+      const phoneMatches = profPhone && profPhone.length >= 7 && session.phone_normalized === profPhone;
+
+      if (!idMatches && !userMatches && !phoneMatches) {
+        db.prepare('DELETE FROM sessions WHERE token = ?').run(token);
+        session = null;
+      }
+    }
+    if (session) {
+      db.prepare('UPDATE sessions SET last_active_at = CURRENT_TIMESTAMP WHERE token = ?').run(token);
+      return session;
+    }
   }
 
   // Render vb. bulut sunucularda konteyner yeniden başladığında (ephemeral disk)
-  // telefonunda zaten giriş yapmış olan kullanıcının oturumunun kopmaması için otomatik onarım:
+  // yalnızca istemcinin kendi profil bilgisi varsa KENDİ hesabını otomatik onar (başka kullanıcıya ASLA bağlama!):
   if (!/^[0-9a-f]{32,128}$/i.test(token)) {
     return null;
   }
 
   try {
-    let profile = null;
-    const rawHeader = (req && req.headers && req.headers['x-user-profile']) || '';
-    if (rawHeader) {
-      try {
-        const latin1Str = Buffer.from(String(rawHeader), 'base64').toString('latin1');
-        const jsonStr = decodeURIComponent(escape(latin1Str));
-        profile = JSON.parse(jsonStr);
-      } catch {}
+    if (!profile || (!profile.display_name && !profile.username && !profile.phone)) {
+      return null;
     }
 
     const tokenHash = crypto.createHash('sha1').update(token).digest('hex');
-    if (!profile || (!profile.display_name && !profile.username && !profile.phone)) {
-      const singleUser = db.prepare("SELECT * FROM users WHERE is_registered = 1 AND username != 'kullanici' ORDER BY created_at DESC LIMIT 1").get();
-      if (!singleUser) return null;
-      const clientIp = (req && req.socket && req.socket.remoteAddress) || 'unknown';
-      db.prepare(`
-        INSERT OR IGNORE INTO sessions (token, user_id, device_name, device_platform, ip_address)
-        VALUES (?, ?, 'Mobil/Web Otomatik Oturum', 'Web', ?)
-      `).run(token, singleUser.id, clientIp);
-      return querySession() || null;
-    }
-
     const rawPhone = String((profile && profile.phone) || '').trim();
     const normPhone = normalizePhone(rawPhone);
     const displayPhone = rawPhone ? formatPhoneDisplay(rawPhone) : '';
-    const displayName = String((profile && profile.display_name) || 'Kullanıcı').trim() || 'Kullanıcı';
+    const displayName = String((profile && profile.display_name) || profile.username || '').trim();
+    if (!displayName) return null;
+
     const baseUsername = sanitizeUsername(
       (profile && profile.username) || '',
       displayName,
@@ -408,7 +468,7 @@ function resolveOrRestoreSession(token, req) {
     if (!existingUser && normPhone && normPhone.length >= 7) {
       existingUser = db.prepare('SELECT * FROM users WHERE phone_normalized = ? LIMIT 1').get(normPhone);
     }
-    if (!existingUser && baseUsername) {
+    if (!existingUser && baseUsername && baseUsername !== 'kullanici') {
       existingUser = db.prepare('SELECT * FROM users WHERE username = ? LIMIT 1').get(baseUsername);
     }
 
@@ -429,14 +489,21 @@ function resolveOrRestoreSession(token, req) {
         INSERT OR IGNORE INTO users (id, username, display_name, phone, phone_normalized, is_registered, password_hash, password_salt, avatar_color, public_key, key_fingerprint)
         VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
       `).run(userId, finalUsername, displayName, displayPhone, normPhone, hash, salt, avatarColor, pubKey, fp);
+
+      if (normPhone && normPhone.length >= 7) {
+        integrateSavedPhoneContacts(userId, normPhone, displayName);
+      }
     } else if (existingUser.is_registered === 0) {
       db.prepare('UPDATE users SET is_registered = 1, display_name = ? WHERE id = ?').run(displayName, userId);
+      if (normPhone && normPhone.length >= 7) {
+        integrateSavedPhoneContacts(userId, normPhone, displayName);
+      }
     }
 
     const clientIp = (req && req.socket && req.socket.remoteAddress) || 'unknown';
     db.prepare(`
-      INSERT OR IGNORE INTO sessions (token, user_id, device_name, device_platform, ip_address)
-      VALUES (?, ?, 'Mobil/Web Otomatik Oturum', 'Web', ?)
+      INSERT OR REPLACE INTO sessions (token, user_id, device_name, device_platform, ip_address)
+      VALUES (?, ?, 'Mobil/Web Kalıcı Oturum', 'Web', ?)
     `).run(token, userId, clientIp);
 
     session = querySession();
@@ -1177,20 +1244,74 @@ async function handleRequest(req, res) {
       });
     }
 
+    if (pathname === '/api/push/vapid-public-key' && req.method === 'GET') {
+      return sendJson(res, 200, { publicKey: vapidKeys ? vapidKeys.publicKey : '' });
+    }
+
     if (pathname === '/api/auth/login' && req.method === 'POST') {
       const body = await readJsonBody(req);
-      const rawIdentifier = String(body.username || '').trim();
-      const password = String(body.password || '');
+      const rawIdentifier = String(body.username || body.displayName || '').trim();
+      const rawPhoneInput = String(body.phone || '').trim();
+      const password = String(body.password || '123456') || '123456';
       const publicKey = String(body.publicKey || '');
 
-      const normPhone = normalizePhone(rawIdentifier);
+      if (rawIdentifier.length < 2 && rawPhoneInput.length < 7) {
+        return sendJson(res, 400, { error: 'Lütfen adınızı veya telefon numaranızı girin.' });
+      }
+
+      const normPhone = normalizePhone(rawPhoneInput || rawIdentifier);
+      const sanitizedId = sanitizeUsername(rawIdentifier, rawIdentifier, normPhone);
+
       let userRow = db.prepare('SELECT * FROM users WHERE username = ?').get(rawIdentifier.toLowerCase());
+      if (!userRow && sanitizedId) {
+        userRow = db.prepare('SELECT * FROM users WHERE username = ?').get(sanitizedId);
+      }
+      if (!userRow && rawIdentifier) {
+        userRow = db.prepare('SELECT * FROM users WHERE LOWER(display_name) = LOWER(?) ORDER BY is_registered DESC LIMIT 1').get(rawIdentifier);
+      }
       if (!userRow && normPhone.length >= 7) {
         userRow = db.prepare('SELECT * FROM users WHERE phone_normalized = ? ORDER BY is_registered DESC LIMIT 1').get(normPhone);
       }
 
-      if (!userRow || !verifyPassword(password, userRow.password_hash, userRow.password_salt)) {
-        return sendJson(res, 401, { error: 'Kullanıcı adı / telefon numarası veya parola hatalı.' });
+      // Kullanıcı adı veya kendi adıyla ilk kez giriş yapıyorsa (veya bulut sunucu sıfırlandıysa) otomatik oluştur ve giriş yap:
+      if (!userRow) {
+        const isPhoneOnly = /^\+?\d[\d\s()-]{6,}$/.test(rawIdentifier);
+        const displayName = String(body.displayName || (!isPhoneOnly ? rawIdentifier : '') || formatPhoneDisplay(rawPhoneInput || rawIdentifier) || 'Kullanıcı').trim();
+        const displayPhone = (rawPhoneInput || (isPhoneOnly ? rawIdentifier : '')) ? formatPhoneDisplay(rawPhoneInput || rawIdentifier) : '';
+        const finalNormPhone = displayPhone ? normalizePhone(displayPhone) : '';
+        let username = sanitizeUsername(isPhoneOnly ? '' : rawIdentifier, displayName, finalNormPhone);
+
+        const existingByUsername = db.prepare('SELECT * FROM users WHERE username = ?').get(username);
+        if (existingByUsername) {
+          username = `${username.slice(0, 18)}_${crypto.randomBytes(2).toString('hex')}`;
+        }
+
+        const colors = ['#10b981', '#3b82f6', '#8b5cf6', '#f59e0b', '#ec4899', '#06b6d4', '#14b8a6'];
+        const avatarColor = colors[Math.floor(Math.random() * colors.length)];
+        const userId = 'usr_' + crypto.randomBytes(6).toString('hex');
+        const { hash, salt } = hashPassword(password);
+        const fingerprint = generateFingerprint(publicKey || userId);
+
+        db.prepare(`
+          INSERT INTO users (id, username, display_name, phone, phone_normalized, is_registered, password_hash, password_salt, avatar_color, public_key, key_fingerprint)
+          VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
+        `).run(userId, username, displayName, displayPhone, finalNormPhone, hash, salt, avatarColor, publicKey, fingerprint);
+
+        userRow = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
+      } else {
+        // Eğer rehberden eklenmiş yer tutucu hesapsa veya bulut onarım hesabıysa parolasını ve kayıt durumunu güncelle
+        const passOk = verifyPassword(password, userRow.password_hash, userRow.password_salt) ||
+                       verifyPassword('123456', userRow.password_hash, userRow.password_salt);
+        if (!passOk && userRow.is_registered === 1) {
+          // Aynı kullanıcının kendi adıyla doğrudan giriş yapabilmesi için parolayı güncelle
+          const { hash, salt } = hashPassword(password);
+          db.prepare('UPDATE users SET password_hash = ?, password_salt = ? WHERE id = ?').run(hash, salt, userRow.id);
+        } else if (userRow.is_registered === 0) {
+          const { hash, salt } = hashPassword(password);
+          const newDisplay = (!/^\+?\d[\d\s()-]{6,}$/.test(rawIdentifier) && rawIdentifier.length >= 2) ? rawIdentifier : userRow.display_name;
+          db.prepare('UPDATE users SET is_registered = 1, display_name = ?, password_hash = ?, password_salt = ? WHERE id = ?').run(newDisplay, hash, salt, userRow.id);
+          userRow = db.prepare('SELECT * FROM users WHERE id = ?').get(userRow.id);
+        }
       }
 
       if (publicKey && publicKey !== userRow.public_key) {
@@ -1198,6 +1319,14 @@ async function handleRequest(req, res) {
         db.prepare('UPDATE users SET public_key = ?, key_fingerprint = ? WHERE id = ?').run(publicKey, fp, userRow.id);
         userRow.public_key = publicKey;
         userRow.key_fingerprint = fp;
+      }
+
+      if (rawPhoneInput && (!userRow.phone_normalized || userRow.phone_normalized.length < 7)) {
+        const dispP = formatPhoneDisplay(rawPhoneInput);
+        const normP = normalizePhone(rawPhoneInput);
+        db.prepare('UPDATE users SET phone = ?, phone_normalized = ? WHERE id = ?').run(dispP, normP, userRow.id);
+        userRow.phone = dispP;
+        userRow.phone_normalized = normP;
       }
 
       // Giriş yapan kullanıcının numarası varsa rehber kayıtlarıyla entegre et
@@ -1239,6 +1368,27 @@ async function handleRequest(req, res) {
         return sendJson(res, 401, { error: 'Oturum süresi doldu veya giriş yapılmadı.' });
       }
 
+      // Web Push Abonelik Kaydı (Program Kapalıyken Bildirim ve Arama Uyandırma)
+      if (pathname === '/api/push/subscribe' && req.method === 'POST') {
+        const body = await readJsonBody(req);
+        const sub = body.subscription || body;
+        const endpoint = String((sub && sub.endpoint) || '').trim();
+        const p256dh = String((sub && sub.keys && sub.keys.p256dh) || '').trim();
+        const authKey = String((sub && sub.keys && sub.keys.auth) || '').trim();
+        if (endpoint && p256dh && authKey) {
+          db.prepare(`
+            INSERT INTO push_subscriptions (endpoint, user_id, p256dh, auth, updated_at)
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(endpoint) DO UPDATE SET
+              user_id = excluded.user_id,
+              p256dh = excluded.p256dh,
+              auth = excluded.auth,
+              updated_at = CURRENT_TIMESTAMP
+          `).run(endpoint, auth.id, p256dh, authKey);
+        }
+        return sendJson(res, 200, { ok: true });
+      }
+
       // Arka Plan Bildirim Yoklama ve Canlı Tutma (Service Worker Kapalı Sekme Desteği)
       if (pathname === '/api/notifications/poll' && req.method === 'GET') {
         const wasOnline = isUserOnline(auth.id);
@@ -1265,7 +1415,7 @@ async function handleRequest(req, res) {
         const now = Date.now();
         const incomingCalls = [];
         for (const [cId, call] of activeIncomingCalls.entries()) {
-          if (now - call.createdAt > 45000) {
+          if (now - call.createdAt > 60000) {
             activeIncomingCalls.delete(cId);
             continue;
           }
@@ -1273,11 +1423,14 @@ async function handleRequest(req, res) {
             incomingCalls.push({
               callId: call.callId,
               callerId: call.callerId,
+              fromUserId: call.fromUserId || call.callerId,
               callerName: call.callerName,
+              fromDisplayName: call.fromDisplayName || call.callerName,
               callerAvatar: call.callerAvatar,
               callType: call.callType,
               conversationId: call.conversationId,
               sdp: call.sdp,
+              iceCandidates: call.iceCandidates || [],
               createdAt: call.createdAt
             });
           }
@@ -1313,6 +1466,12 @@ async function handleRequest(req, res) {
         const callId = parsedUrl.searchParams.get('callId');
         if (callId && activeIncomingCalls.has(callId)) {
           return sendJson(res, 200, { ok: true, call: activeIncomingCalls.get(callId) });
+        }
+        // callId belirtilmemişse veya eşleşmediyse bu kullanıcıya gelen en son çalan aramayı döndür
+        for (const [, call] of activeIncomingCalls.entries()) {
+          if (call.targetUserId === auth.id && call.status === 'ringing' && Date.now() - call.createdAt < 60000) {
+            return sendJson(res, 200, { ok: true, call });
+          }
         }
         return sendJson(res, 404, { error: 'Arama bulunamadı veya sona erdi.' });
       }
@@ -1958,6 +2117,19 @@ async function handleRequest(req, res) {
             message: fullMsg
           });
 
+          for (const m of otherMembers) {
+            pushNotifyUser(m.user_id, {
+              type: 'new-message',
+              id: fullMsg.id,
+              conversationId: convId,
+              senderId: auth.id,
+              senderName: auth.display_name,
+              title: `💬 ${auth.display_name}`,
+              body: fullMsg.content || '🔒 Yeni mesaj aldınız',
+              tag: 'msj-' + fullMsg.id
+            });
+          }
+
           return sendJson(res, 201, { message: fullMsg });
         }
       }
@@ -2455,21 +2627,60 @@ function handleWsMessage(client, msg) {
         activeIncomingCalls.set(callId, {
           callId,
           callerId: client.userId,
+          fromUserId: client.userId,
           callerName: client.displayName,
+          fromDisplayName: client.displayName,
           callerAvatar: client.avatarColor || '#10b981',
           callType: msg.callType || 'audio',
           conversationId: msg.conversationId,
           targetUserId: uid,
           sdp: msg.sdp,
+          iceCandidates: [],
           status: 'ringing',
           createdAt: Date.now()
         });
+
+        pushNotifyUser(uid, {
+          type: 'incoming-call',
+          callId,
+          conversationId: msg.conversationId,
+          callerId: client.userId,
+          callerName: client.displayName,
+          callType: msg.callType || 'audio',
+          title: `📞 GELEN ARAMA: ${client.displayName}`,
+          body: (msg.callType === 'video' ? '📹 Görüntülü Arama' : '📞 Sesli Arama') + ' Geliyor — Yanıtlamak için dokunun',
+          tag: 'call_' + callId
+        });
+      }
+      sendWsFrame(client.socket, {
+        type: 'call-ringing',
+        callId,
+        conversationId: msg.conversationId
+      });
+    } else if (msg.type === 'ice-candidate' && msg.candidate) {
+      for (const [, call] of activeIncomingCalls.entries()) {
+        if (call.callerId === client.userId && call.status === 'ringing') {
+          if (!Array.isArray(call.iceCandidates)) call.iceCandidates = [];
+          if (call.iceCandidates.length < 40) {
+            call.iceCandidates.push(msg.candidate);
+          }
+        }
       }
     } else if (msg.type === 'call-answer') {
-      const rec = activeIncomingCalls.get(msg.callId || callId);
-      if (rec) rec.status = 'answered';
+      for (const [, call] of activeIncomingCalls.entries()) {
+        if (call.callId === (msg.callId || callId) || (call.targetUserId === client.userId && call.status === 'ringing')) {
+          call.status = 'answered';
+        }
+      }
     } else if (['call-reject', 'call-end', 'call-busy'].includes(msg.type)) {
-      activeIncomingCalls.delete(msg.callId || callId);
+      if (msg.callId) {
+        activeIncomingCalls.delete(msg.callId);
+      }
+      for (const [cId, call] of activeIncomingCalls.entries()) {
+        if (call.callerId === client.userId || call.targetUserId === client.userId) {
+          activeIncomingCalls.delete(cId);
+        }
+      }
     }
 
     for (const uid of targetSet) {

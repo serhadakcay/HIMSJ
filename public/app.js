@@ -1,6 +1,6 @@
-// BUILD_VER: 700
+// BUILD_VER: 720
 /**
- * Mesajlaşma Uygulaması - İstemci Uygulama Mantığı (v6.0)
+ * Mesajlaşma Uygulaması - İstemci Uygulama Mantığı (v7.2)
  * - Cep Telefonu Rehberinden Kişi Ekleme (Contact Picker API + Anında Optimistik Kayıt + VCF + Toplu Metin + Manuel)
  * - Numara veya Rehberden Eklenen Kişilere SMS ve WhatsApp Mesajı Gönderme
  *   ("............ Bu numaraları kullanıcı sizi programı kullanmak için ekledi")
@@ -8,7 +8,8 @@
  * - Gerçek Zamanlı Sesli & Görüntülü Arama (WebRTC + CGNAT WebSocket Ses/Görüntü Rölesi + Sesi Dışarı Verme / Hoparlör)
  * - Tüm Telefon, Tablet ve Bilgisayar Ekranlarına Otomatik Sığma + Kullanıcıya Özel Yazı Boyutu ve Yazı Stili Seçimi
  * - Aktif Olanları Yeşil (🟢), Aktif Olmayanları Kırmızı (🔴) Yuvarlakla Gösterme
- * - Program Kapatılsa Bile Arka Planda Çalışma İzni (Service Worker + Push/Notification + WakeLock)
+ * - Program Kapatılsa Bile Arka Planda Mesaj ve Arama Alma (Web Push VAPID + Kalıcı Service Worker + WakeLock)
+ * - Her Kullanıcının Kendi Adıyla Kalıcı Girişi (Çıkış Yapıp Giriş Yapmaya Gerek Kalmadan Kendi Hesabını Koruma)
  */
 
 const App = {
@@ -51,6 +52,7 @@ const App = {
   incomingOffer: null,
   callTimerInterval: null,
   callRingInterval: null,
+  webrtcStatsInterval: null,
   callSeconds: 0,
   isSpeakerOn: false,
   callAudioCtx: null,
@@ -60,6 +62,9 @@ const App = {
   wsVideoInterval: null,
   webrtcAudioReceived: false,
   webrtcVideoReceived: false,
+  _lastAudioBytes: 0,
+  _lastVideoBytes: 0,
+  _captureVideoEl: null,
   nextPlayTime: 0,
 
   // Kullanıcıya Özel Yazı Boyutu ve Yazı Stili Ayarları
@@ -67,23 +72,156 @@ const App = {
   fontFamilyKey: localStorage.getItem('msj_font_family') || 'modern',
   fontStyleMode: localStorage.getItem('msj_font_style_mode') || 'normal',
 
+  generateRandomHexToken() {
+    const arr = new Uint8Array(32);
+    if (window.crypto && window.crypto.getRandomValues) {
+      window.crypto.getRandomValues(arr);
+    } else {
+      for (let i = 0; i < 32; i++) arr[i] = Math.floor(Math.random() * 256);
+    }
+    return Array.from(arr, (b) => b.toString(16).padStart(2, '0')).join('');
+  },
+
+  getEncodedProfile(userObj = null) {
+    try {
+      const prof =
+        userObj ||
+        this.user ||
+        JSON.parse(localStorage.getItem('msj_own_identity') || localStorage.getItem('msj_user_profile') || 'null');
+      if (!prof || (!prof.id && !prof.username && !prof.display_name)) return '';
+      return btoa(
+        unescape(
+          encodeURIComponent(
+            JSON.stringify({
+              id: prof.id,
+              username: prof.username,
+              display_name: prof.display_name,
+              phone: prof.phone || '',
+              avatar_color: prof.avatar_color || '#10b981',
+              public_key: prof.public_key || '',
+              key_fingerprint: prof.key_fingerprint || ''
+            })
+          )
+        )
+      );
+    } catch {
+      return '';
+    }
+  },
+
+  saveOwnIdentity(userObj) {
+    if (!userObj || !userObj.display_name) return;
+    this.user = userObj;
+    const serialized = JSON.stringify(userObj);
+    localStorage.setItem('msj_user_profile', serialized);
+    localStorage.setItem('msj_own_identity', serialized);
+  },
+
+  healHijackedIdentityIfNeeded() {
+    try {
+      const ownRaw = localStorage.getItem('msj_own_identity');
+      if (ownRaw) {
+        const own = JSON.parse(ownRaw);
+        if (own && own.display_name) {
+          this.user = own;
+          localStorage.setItem('msj_user_profile', JSON.stringify(own));
+          return;
+        }
+      }
+
+      const savedRaw = localStorage.getItem('msj_user_profile');
+      const saved = savedRaw ? JSON.parse(savedRaw) : null;
+
+      // Cihazdaki E2EE anahtar geçmişini kontrol et (Eski oturum çakışmasında ilk kurulan anahtar gerçek kullanıcıya aittir)
+      const kpEntries = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && k.startsWith('msj_e2ee_keypair_v1_')) {
+          const uname = k.slice('msj_e2ee_keypair_v1_'.length).trim();
+          if (!uname || uname === 'default') continue;
+          try {
+            const val = JSON.parse(localStorage.getItem(k) || '{}');
+            kpEntries.push({
+              username: uname,
+              createdAt: val.createdAt || '1970-01-01T00:00:00.000Z',
+              publicKey: val.publicKey || ''
+            });
+          } catch {}
+        }
+      }
+      kpEntries.sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
+
+      if (saved && saved.username) {
+        const isCemOrtiProfile = /cem[\s_.-]*orti/i.test(saved.display_name || '') || /cem[\s_.-]*orti/i.test(saved.username || '');
+        if (isCemOrtiProfile && kpEntries.length > 0) {
+          const earliestNonCem = kpEntries.find((e) => !/cem[\s_.-]*orti/i.test(e.username));
+          if (earliestNonCem) {
+            const prettyName = earliestNonCem.username
+              .replace(/_/g, ' ')
+              .replace(/\b\w/g, (c) => c.toUpperCase());
+            const restored = {
+              id: 'usr_' + this.generateRandomHexToken().slice(0, 12),
+              username: earliestNonCem.username,
+              display_name: prettyName,
+              phone: '',
+              avatar_color: '#10b981',
+              public_key: earliestNonCem.publicKey || ''
+            };
+            this.token = this.generateRandomHexToken();
+            localStorage.setItem('msj_token', this.token);
+            this.saveOwnIdentity(restored);
+            return;
+          }
+        }
+        this.user = saved;
+        localStorage.setItem('msj_own_identity', JSON.stringify(saved));
+      } else if (kpEntries.length > 0) {
+        const firstKp = kpEntries[0];
+        const prettyName = firstKp.username
+          .replace(/_/g, ' ')
+          .replace(/\b\w/g, (c) => c.toUpperCase());
+        const restored = {
+          id: 'usr_' + this.generateRandomHexToken().slice(0, 12),
+          username: firstKp.username,
+          display_name: prettyName,
+          phone: '',
+          avatar_color: '#10b981',
+          public_key: firstKp.publicKey || ''
+        };
+        if (!this.token) {
+          this.token = this.generateRandomHexToken();
+          localStorage.setItem('msj_token', this.token);
+        }
+        this.saveOwnIdentity(restored);
+      }
+    } catch {}
+  },
+
   async init() {
     const savedTheme = localStorage.getItem('msj_theme') || 'dark';
     document.documentElement.setAttribute('data-theme', savedTheme);
     this.applyTypographySettings();
 
-    // Eski önbellekleri temizle
+    // Eski önbellekleri temizle (Service Worker durum önbelleğini koru)
     if ('caches' in window) {
-      caches.keys().then((keys) => keys.forEach((k) => caches.delete(k))).catch(() => {});
+      caches
+        .keys()
+        .then((keys) =>
+          keys.forEach((k) => {
+            if (!k.includes('sw-state')) caches.delete(k);
+          })
+        )
+        .catch(() => {});
     }
 
-    // Yedek kullanıcı profilini yükle (Render konteyner sıfırlamalarında oturumu otomatik onarmak için)
-    try {
-      const savedProfile = localStorage.getItem('msj_user_profile');
-      if (savedProfile && !this.user) {
-        this.user = JSON.parse(savedProfile);
-      }
-    } catch {}
+    // Kullanıcının kendi kimliğini yükle ve olası oturum karışıklıklarını otomatik onar
+    this.healHijackedIdentityIfNeeded();
+
+    // Eğer kullanıcı profili var ama token silinmişse bile çıkış yaptırma, yeni token üretip oturumu koru!
+    if (this.user && this.user.display_name && !this.token) {
+      this.token = this.generateRandomHexToken();
+      localStorage.setItem('msj_token', this.token);
+    }
 
     // HTTPS geçişinde oturum anahtarını (auth_token) URL'den devral
     let autoOpenContacts = false;
@@ -109,34 +247,68 @@ const App = {
 
     if ('serviceWorker' in navigator) {
       try {
-        navigator.serviceWorker.addEventListener('message', (ev) => {
-          if (ev.data && ev.data.type === 'SW_FORCE_RELOAD') {
-            if (sessionStorage.getItem('msj_sw_reloaded_v5') !== '1') {
-              sessionStorage.setItem('msj_sw_reloaded_v5', '1');
-              window.location.reload();
+        navigator.serviceWorker.addEventListener('message', async (ev) => {
+          if (!ev.data) return;
+          if (ev.data.type === 'SW_READY_FOR_TOKEN') {
+            this.syncServiceWorkerToken();
+          } else if (ev.data.type === 'ACCEPT_CALL_VIA_NOTIF') {
+            if (this.incomingOffer) {
+              await this.acceptIncomingCall();
+            } else if (ev.data.callId) {
+              try {
+                const res = await this.api(`/api/calls/active?callId=${encodeURIComponent(ev.data.callId)}`);
+                if (res && res.call) {
+                  await this.handleIncomingCallOffer(res.call);
+                  await this.acceptIncomingCall();
+                }
+              } catch {}
+            }
+          } else if (ev.data.type === 'BG_INCOMING_CALL' && ev.data.call) {
+            if (!this.activeCall && (!this.incomingOffer || this.incomingOffer.callId !== ev.data.call.callId)) {
+              await this.handleIncomingCallOffer(ev.data.call);
+            }
+          } else if (ev.data.type === 'BG_NEW_MESSAGES') {
+            await this.loadConversations();
+            if (this.activeConvId) {
+              const data = await this.api(`/api/conversations/${this.activeConvId}/messages`).catch(() => null);
+              if (data && data.messages) {
+                this.messages = data.messages;
+                await this.renderMessages(true);
+              }
+            }
+          } else if (ev.data.type === 'OPEN_CONVERSATION') {
+            if (ev.data.conversationId) {
+              await this.openConversation(ev.data.conversationId);
             }
           }
         });
-        const reg = await navigator.serviceWorker.register('/sw.js?v=7.0');
+        const reg = await navigator.serviceWorker.register('/sw.js?v=7.2');
         reg.update().catch(() => {});
-        if (this.token && reg.active) {
-          reg.active.postMessage({ type: 'SET_BG_TOKEN', token: this.token });
-        }
       } catch {}
     }
 
     if (this.token) {
       try {
-        const data = await this.api('/api/auth/me');
-        this.user = data.user;
-        localStorage.setItem('msj_user_profile', JSON.stringify(this.user));
+        let data = await this.api('/api/auth/me');
+        // Eğer sunucudan dönen kullanıcı bu cihazın kendi kullanıcısından farklıysa yeni token ile kendi hesabını zorla onar
+        if (
+          this.user &&
+          this.user.username &&
+          data.user &&
+          data.user.id !== this.user.id &&
+          data.user.username.toLowerCase() !== this.user.username.toLowerCase()
+        ) {
+          this.token = this.generateRandomHexToken();
+          localStorage.setItem('msj_token', this.token);
+          data = await this.api('/api/auth/me');
+        }
+        this.saveOwnIdentity(data.user);
         this.keyBundle = await window.E2EE.ensureIdentityKeyPair(this.user.username);
         if (this.keyBundle.publicKey && this.keyBundle.publicKey !== this.user.public_key) {
           const updated = await this.api('/api/auth/profile', 'PUT', {
             public_key: this.keyBundle.publicKey
           });
-          this.user = updated.user;
-          localStorage.setItem('msj_user_profile', JSON.stringify(this.user));
+          this.saveOwnIdentity(updated.user);
         }
         await this.enterApp();
         if (autoOpenContacts) {
@@ -145,8 +317,18 @@ const App = {
         }
         return;
       } catch {
-        this.token = '';
-        localStorage.removeItem('msj_token');
+        // Ağ gecikmesi veya sunucu uyanma sürecinde kullanıcıyı ASLA çıkışa atma; kendi profili varsa doğrudan içeri al!
+        if (this.user && this.user.display_name) {
+          this.token = this.generateRandomHexToken();
+          localStorage.setItem('msj_token', this.token);
+          this.keyBundle = await window.E2EE.ensureIdentityKeyPair(this.user.username || this.user.display_name);
+          await this.enterApp();
+          if (autoOpenContacts) {
+            this.switchNav('contacts');
+            this.openContactModal();
+          }
+          return;
+        }
       }
     }
     this.showAuthScreen();
@@ -157,17 +339,10 @@ const App = {
     if (this.token) {
       headers['Authorization'] = `Bearer ${this.token}`;
     }
-    try {
-      const prof = this.user || JSON.parse(localStorage.getItem('msj_user_profile') || 'null');
-      if (prof && prof.id) {
-        headers['X-User-Profile'] = btoa(unescape(encodeURIComponent(JSON.stringify({
-          id: prof.id,
-          username: prof.username,
-          display_name: prof.display_name,
-          phone: prof.phone
-        }))));
-      }
-    } catch {}
+    const encodedProf = this.getEncodedProfile();
+    if (encodedProf) {
+      headers['X-User-Profile'] = encodedProf;
+    }
     const opts = { method, headers };
     if (body) opts.body = JSON.stringify(body);
     const res = await fetch(url, opts);
@@ -226,13 +401,43 @@ const App = {
     };
   },
 
-  // --- ARKA PLANDA ÇALIŞMA VE İZİN SİHİRBAZI ---
+  // --- ARKA PLANDA ÇALIŞMA, WEB PUSH VE İZİN SİHİRBAZI ---
+  urlBase64ToUint8Array(base64String) {
+    const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
+    const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+    const rawData = window.atob(base64);
+    const outputArray = new Uint8Array(rawData.length);
+    for (let i = 0; i < rawData.length; ++i) {
+      outputArray[i] = rawData.charCodeAt(i);
+    }
+    return outputArray;
+  },
+
+  async subscribeToWebPush(reg) {
+    if (!reg || !reg.pushManager || !this.token) return;
+    try {
+      const vapidRes = await this.api('/api/push/vapid-public-key');
+      if (!vapidRes || !vapidRes.publicKey) return;
+      const appServerKey = this.urlBase64ToUint8Array(vapidRes.publicKey);
+      let sub = await reg.pushManager.getSubscription();
+      if (!sub) {
+        sub = await reg.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: appServerKey
+        });
+      }
+      if (sub) {
+        await this.api('/api/push/subscribe', 'POST', { subscription: sub.toJSON ? sub.toJSON() : sub });
+      }
+    } catch {}
+  },
+
   checkBackgroundBannerState() {
     const banner = document.getElementById('bg-permission-banner');
     if (!banner) return;
     const notifGranted = 'Notification' in window && Notification.permission === 'granted';
-    const savedBg = localStorage.getItem('msj_bg_perm_granted') === '1';
-    if (notifGranted && savedBg) {
+    if (notifGranted) {
+      localStorage.setItem('msj_bg_perm_granted', '1');
       banner.classList.add('hidden');
       this.syncServiceWorkerToken();
     } else {
@@ -244,8 +449,16 @@ const App = {
     if (!('serviceWorker' in navigator) || !this.token) return;
     try {
       const reg = await navigator.serviceWorker.ready;
-      if (reg.active) {
-        reg.active.postMessage({ type: 'SET_BG_TOKEN', token: this.token });
+      const sw = reg.active || reg.waiting || reg.installing;
+      if (sw) {
+        sw.postMessage({
+          type: 'SET_BG_TOKEN',
+          token: this.token,
+          profile: this.getEncodedProfile()
+        });
+      }
+      if ('Notification' in window && Notification.permission === 'granted') {
+        await this.subscribeToWebPush(reg);
       }
       if ('periodicSync' in reg) {
         await reg.periodicSync.register('msj-bg-sync', { minInterval: 60 * 1000 }).catch(() => {});
@@ -261,7 +474,7 @@ const App = {
       if ('Notification' in window) {
         const perm = await Notification.requestPermission();
         if (perm === 'granted') {
-          this.toast('🔔 Bildirim ve arka plan uyandırma izni verildi!');
+          this.toast('🔔 Bildirim ve kapalıyken uyandırma izni verildi!');
         }
       }
 
@@ -285,14 +498,61 @@ const App = {
         if (reg.active) {
           reg.active.postMessage({
             type: 'SHOW_LOCAL_NOTIFICATION',
-            title: '✅ Arka Planda Çalışma Aktif',
-            body: 'Program kapatılsa bile yeni mesaj ve aramalar size anında bildirilecektir.'
+            title: '✅ Kapalıyken Bildirim & Arama Aktif',
+            body: 'Program kapatılsa bile yeni mesaj ve aramalar ekranınıza anında düşecektir.'
           });
         }
       }
     } catch (err) {
       this.toast('İzin isteği tamamlandı: ' + err.message);
     }
+  },
+
+  startBackgroundKeepAlive() {
+    if (this._keepAliveRunning) return;
+    this._keepAliveRunning = true;
+    try {
+      const audioEl = document.getElementById('bg-keepalive-audio');
+      if (audioEl) {
+        audioEl.src = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
+        audioEl.volume = 0.001;
+        const playPromise = audioEl.play();
+        if (playPromise) {
+          playPromise.catch(() => {
+            const unlock = () => {
+              audioEl.play().catch(() => {});
+              if ('Notification' in window && Notification.permission === 'default') {
+                Notification.requestPermission().then(() => this.checkBackgroundBannerState()).catch(() => {});
+              }
+              window.removeEventListener('click', unlock);
+              window.removeEventListener('touchstart', unlock);
+            };
+            window.addEventListener('click', unlock, { once: true });
+            window.addEventListener('touchstart', unlock, { once: true });
+          });
+        }
+      }
+    } catch {}
+
+    // Arka planda WebSocket bağlantısını ve gelen aramaları periyodik kontrol et
+    if (this._bgKeepAliveInterval) clearInterval(this._bgKeepAliveInterval);
+    this._bgKeepAliveInterval = setInterval(async () => {
+      if (!this.token) return;
+      if (!this.ws || this.ws.readyState === WebSocket.CLOSED || this.ws.readyState === WebSocket.CLOSING) {
+        this.connectWebSocket();
+      }
+      if (document.hidden || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
+        try {
+          const data = await this.api('/api/notifications/poll');
+          if (data && Array.isArray(data.incomingCalls) && data.incomingCalls.length > 0) {
+            const call = data.incomingCalls[0];
+            if (!this.activeCall && (!this.incomingOffer || this.incomingOffer.callId !== call.callId)) {
+              await this.handleIncomingCallOffer(call);
+            }
+          }
+        } catch {}
+      }
+    }, 5000);
   },
 
   // --- 1 & 2. CEP TELEFONU REHBERİNDEN KİŞİ EKLEME VE SMS / WHATSAPP DAVET SİSTEMİ ---
@@ -303,12 +563,19 @@ const App = {
     const phoneInput = document.getElementById('contact-phone-input');
     const bulkEl = document.getElementById('bulk-contacts-input');
     const statusEl = document.getElementById('contact-lookup-status');
+    const httpsBanner = document.getElementById('https-required-banner');
+
     if (nameInput) nameInput.value = '';
     if (phoneInput) phoneInput.value = '';
     if (bulkEl) bulkEl.value = '';
     if (statusEl) {
       statusEl.style.display = 'none';
       statusEl.innerHTML = '';
+    }
+
+    if (httpsBanner) {
+      const isSecure = window.isSecureContext || location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+      httpsBanner.classList.toggle('hidden', Boolean(isSecure));
     }
 
     const modal = document.getElementById('contact-modal');
@@ -384,6 +651,13 @@ const App = {
   },
 
   importFromPhoneContactsApi(multiple = false) {
+    const isSecure = window.isSecureContext || location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+    if (!isSecure) {
+      this.toast('🔒 Telefon rehberine erişmek için Chrome güvenli HTTPS bağlantısı gerektirir. Güvenli HTTPS adresine yönlendiriliyorsunuz...', 'info');
+      setTimeout(() => this.switchToHttpsForContacts(), 1200);
+      return;
+    }
+
     // ÖNEMLİ: Kullanıcı dokunma izninin (User Gesture) kaybolmaması için
     // navigator.contacts.select() çağrısı önünde hiçbir await kullanılmamalıdır!
     if (navigator.contacts && typeof navigator.contacts.select === 'function') {
@@ -412,7 +686,7 @@ const App = {
             if (modal && modal.classList.contains('hidden')) {
               this.openContactModal();
             }
-            this.toast('⚠️ Numara seçilmedi: Cem ORTİ (+2 numara) gibi birden fazla numarası olan kişilerde kişinin üzerine dokunup numarayı seçtikten sonra Bitti\'ye basın. Veya aşağıdaki kutucuğa adı ve numarayı yazıp 1 saniyede kaydedebilirsiniz.', 'error');
+            this.toast('ℹ️ Rehberden kişi seçimi yapılmadı veya iptal edildi.', 'info');
             return;
           }
           await this.processPickedPhoneContacts(selected);
@@ -423,7 +697,7 @@ const App = {
             this.openContactModal();
           }
           if (err && (err.name === 'AbortError' || /cancel/i.test(err.message || ''))) {
-            this.toast('⚠️ Numara seçilmedi: Cem ORTİ (+2 numara) gibi birden fazla numarası olan kişilerde kişinin üzerine dokunup numarayı seçtikten sonra Bitti\'ye basın. Veya aşağıdaki kutucuğa adı ve numarayı yazıp 1 saniyede kaydedebilirsiniz.', 'error');
+            this.toast('ℹ️ Rehber seçimi iptal edildi.', 'info');
             return;
           }
           this.toast('📱 ' + (err && err.message ? err.message : 'Rehber seçici açılamadı. Lütfen numara yazarak ekleyin.'));
@@ -634,15 +908,90 @@ const App = {
     }
   },
 
+  showSelectPhoneNumberModal(contactName, phoneList, onSelectCallback) {
+    this.pendingPhoneSelectionCallback = onSelectCallback;
+    const titleEl = document.getElementById('select-phone-title');
+    const descEl = document.getElementById('select-phone-desc');
+    const listEl = document.getElementById('select-phone-list');
+
+    if (titleEl) {
+      titleEl.textContent = `📱 ${contactName || 'Kişi'} — Numara Seçimi`;
+    }
+    if (descEl) {
+      descEl.textContent = `"${contactName}" kişisine ait ${phoneList.length} farklı telefon numarası bulundu. Lütfen uygulamaya eklemek istediğiniz numarayı seçin:`;
+    }
+
+    if (listEl) {
+      listEl.innerHTML = phoneList.map((rawPhone, idx) => {
+        const norm = this.normalizePhoneClient(rawPhone);
+        const disp = this.formatPhoneDisplayClient(rawPhone);
+        const digits = (norm || rawPhone).replace(/\D/g, '');
+        const isMobile = /(?:^\+?90|^0)?5\d{8}/.test(digits);
+        const tag = isMobile ? '📱 Cep / Mobil' : '☎️ Sabit / Diğer';
+        return `
+          <label style="display:flex;align-items:center;gap:12px;padding:12px;background:var(--bg-input);border:1px solid var(--border-color);border-radius:10px;cursor:pointer;transition:background 0.2s;">
+            <input type="radio" name="chosen_phone_radio" value="${rawPhone}" ${idx === 0 ? 'checked' : ''} style="width:18px;height:18px;accent-color:var(--primary-color);" />
+            <div style="flex:1;">
+              <div style="font-weight:600;font-size:14px;color:var(--text-main);display:flex;align-items:center;justify-content:space-between;">
+                <span>${disp}</span>
+                <span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:4px;background:${isMobile ? '#065f46;color:#34d399;' : 'var(--bg-hover);color:var(--text-muted);'}">${tag}</span>
+              </div>
+              <div style="font-size:12px;color:var(--text-muted);margin-top:2px;">${contactName}</div>
+            </div>
+          </label>
+        `;
+      }).join('') + `
+        <label style="display:flex;align-items:center;gap:12px;padding:12px;background:var(--bg-input);border:1px dashed var(--primary-color);border-radius:10px;cursor:pointer;transition:background 0.2s;">
+          <input type="radio" name="chosen_phone_radio" value="__ALL__" style="width:18px;height:18px;accent-color:var(--primary-color);" />
+          <div style="flex:1;">
+            <div style="font-weight:600;font-size:14px;color:var(--primary-color);">
+              👥 Tüm Numaraları Ayrı Ayrı Ekle (${phoneList.length} Numara)
+            </div>
+            <div style="font-size:12px;color:var(--text-muted);margin-top:2px;">
+              Her iki numara için de ayrı kişi ve sohbet kaydı oluşturulur
+            </div>
+          </div>
+        </label>
+      `;
+    }
+
+    const modal = document.getElementById('select-phone-modal');
+    if (modal) {
+      modal.classList.remove('hidden');
+    }
+  },
+
+  confirmSelectedPhoneNumber() {
+    const listEl = document.getElementById('select-phone-list');
+    if (!listEl) return;
+    const checked = listEl.querySelector('input[name="chosen_phone_radio"]:checked');
+    if (!checked) {
+      this.toast('Lütfen eklemek istediğiniz numarayı seçin.', 'error');
+      return;
+    }
+
+    const chosenVal = checked.value;
+    const modal = document.getElementById('select-phone-modal');
+    if (modal) modal.classList.add('hidden');
+
+    if (typeof this.pendingPhoneSelectionCallback === 'function') {
+      const cb = this.pendingPhoneSelectionCallback;
+      this.pendingPhoneSelectionCallback = null;
+      cb(chosenVal);
+    }
+  },
+
   async processPickedPhoneContacts(selected) {
     try {
       const list = Array.isArray(selected) ? selected : Array.from(selected || []);
-      const formatted = [];
-      const seenNormPhones = new Set();
+      if (list.length === 0) {
+        this.toast('⚠️ Rehberden kişi seçilmedi.', 'error');
+        return;
+      }
 
+      const parsedItems = [];
       for (const c of list) {
         if (!c) continue;
-        // ContactInfo getter özelliklerini doğrudan oku
         const names = c.name ? (Array.isArray(c.name) ? c.name : Array.from(c.name)) : [];
         const tels = c.tel ? (Array.isArray(c.tel) ? c.tel : Array.from(c.tel)) : [];
 
@@ -656,50 +1005,117 @@ const App = {
           .filter(Boolean)
           .join(' ') || String(c.displayName || '').trim();
 
-        const cleanPhones = tels
-          .map((p) => {
-            if (p && typeof p === 'object') {
-              p = p.value || p.number || p.tel || p.phone || '';
-            }
-            return String(p || '').replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, '').trim();
-          })
-          .filter(Boolean);
+        const cleanPhones = [];
+        const seen = new Set();
+        for (let p of tels) {
+          if (p && typeof p === 'object') {
+            p = p.value || p.number || p.tel || p.phone || '';
+          }
+          const str = String(p || '').replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, '').trim();
+          const norm = this.normalizePhoneClient(str);
+          if (str && (!norm || !seen.has(norm))) {
+            if (norm) seen.add(norm);
+            cleanPhones.push(str);
+          }
+        }
 
-        // Eğer birden fazla numara varsa (+2 tane daha vb.) mobil numarayı (05... veya +905...) önceliklendir
-        if (cleanPhones.length > 1) {
-          cleanPhones.sort((a, b) => {
+        parsedItems.push({ cleanName, cleanPhones });
+      }
+
+      // Durum 1: Tek kişi seçildi ve birden fazla numarası var -> KULLANICIYA SEÇİM HAKKI VER!
+      if (parsedItems.length === 1 && parsedItems[0].cleanPhones.length > 1) {
+        const item = parsedItems[0];
+        this.showSelectPhoneNumberModal(item.cleanName || 'Kişi', item.cleanPhones, async (chosen) => {
+          const finalFormatted = [];
+          if (chosen === '__ALL__') {
+            item.cleanPhones.forEach((p, idx) => {
+              finalFormatted.push({
+                name: item.cleanName ? `${item.cleanName} (${idx + 1})` : this.formatPhoneDisplayClient(p),
+                phone: p
+              });
+            });
+          } else {
+            finalFormatted.push({
+              name: item.cleanName || this.formatPhoneDisplayClient(chosen),
+              phone: chosen
+            });
+          }
+          await this.finishContactsImport(finalFormatted);
+        });
+        return;
+      }
+
+      // Durum 2: Seçilen kişide hiç numara bulunamadıysa -> Adı forma doldur ve numara girmesini iste
+      if (parsedItems.length === 1 && parsedItems[0].cleanPhones.length === 0) {
+        const item = parsedItems[0];
+        const modal = document.getElementById('contact-modal');
+        if (modal) modal.classList.remove('hidden');
+        const nameInput = document.getElementById('contact-name-input');
+        const phoneInput = document.getElementById('contact-phone-input');
+        if (nameInput && item.cleanName) nameInput.value = item.cleanName;
+        if (phoneInput) {
+          phoneInput.value = '';
+          phoneInput.focus();
+        }
+        this.toast(`ℹ️ "${item.cleanName || 'Kişi'}" için rehberde kayıtlı telefon numarası bulunamadı. Lütfen numarasını yazıp 'Kişiyi Kaydet'e basın.`, 'info');
+        return;
+      }
+
+      // Durum 3: Tek kişi tek numaralı veya toplu seçim (birden çok kişi)
+      const finalFormatted = [];
+      const seenDedup = new Set();
+      for (const item of parsedItems) {
+        if (item.cleanPhones.length === 0) {
+          if (item.cleanName) {
+            finalFormatted.push({ name: item.cleanName, phone: '' });
+          }
+        } else if (item.cleanPhones.length === 1) {
+          const p = item.cleanPhones[0];
+          const norm = this.normalizePhoneClient(p) || p;
+          const k = `${item.cleanName.toLowerCase()}|${norm}`;
+          if (!seenDedup.has(k)) {
+            seenDedup.add(k);
+            finalFormatted.push({
+              name: item.cleanName || this.formatPhoneDisplayClient(p),
+              phone: p
+            });
+          }
+        } else {
+          // Toplu seçimde birden fazla numara varsa mobil olanı önceliklendir
+          item.cleanPhones.sort((a, b) => {
             const aIsMob = /(?:^\+?90|^0)?5\d{8}/.test(a.replace(/\D/g, ''));
             const bIsMob = /(?:^\+?90|^0)?5\d{8}/.test(b.replace(/\D/g, ''));
             if (aIsMob && !bIsMob) return -1;
             if (!aIsMob && bIsMob) return 1;
             return 0;
           });
-        }
-
-        if (cleanPhones.length > 0) {
-          const tel = cleanPhones[0];
-          const norm = this.normalizePhoneClient(tel) || tel;
-          const dedupKey = `${cleanName.toLowerCase()}|${norm}`;
-          if (!seenNormPhones.has(dedupKey)) {
-            seenNormPhones.add(dedupKey);
-            formatted.push({
-              name: cleanName || this.formatPhoneDisplayClient(tel),
-              phone: tel
+          const p = item.cleanPhones[0];
+          const norm = this.normalizePhoneClient(p) || p;
+          const k = `${item.cleanName.toLowerCase()}|${norm}`;
+          if (!seenDedup.has(k)) {
+            seenDedup.add(k);
+            finalFormatted.push({
+              name: item.cleanName || this.formatPhoneDisplayClient(p),
+              phone: p
             });
           }
-        } else if (cleanName) {
-          formatted.push({
-            name: cleanName,
-            phone: ''
-          });
         }
       }
 
-      if (formatted.length === 0) {
-        this.toast('⚠️ Seçilen kişide geçerli isim veya telefon numarası bulunamadı.', 'error');
+      if (finalFormatted.length === 0) {
+        this.toast('⚠️ Seçilen kişilerde geçerli isim veya numara bulunamadı.', 'error');
         return;
       }
 
+      await this.finishContactsImport(finalFormatted);
+    } catch (err) {
+      console.error('Rehber işleme hatası:', err);
+      this.toast('❌ Rehber işleme hatası: ' + (err.message || 'Bilinmeyen hata'), 'error');
+    }
+  },
+
+  async finishContactsImport(formatted) {
+    try {
       // 1. ANINDA OPTİMİSTİK KAYIT (0ms GECİKME - KULLANICI ASLA BEKLEMEZ)
       const optimistic = this.buildOptimisticContacts(formatted);
       this.applyOptimisticContactsToUi(optimistic);
@@ -720,7 +1136,7 @@ const App = {
       this.renderSidebar();
       this.toast(`✅ ${optimistic.length} kişi (${optimistic.map((x) => x.display_name).join(', ')}) rehberinize eklendi!`);
 
-      // Davet modalını da aç
+      // Davet modalını aç
       this.openInviteModal({
         importedCount: optimistic.length,
         contacts: optimistic,
@@ -731,8 +1147,8 @@ const App = {
       localStorage.setItem('msj_pending_phone_import', JSON.stringify(formatted));
       await this.flushPendingPhoneImport();
     } catch (err) {
-      console.error('Rehber aktarım hatası:', err);
-      this.toast('❌ Rehber aktarım hatası: ' + (err.message || 'Bilinmeyen hata'), 'error');
+      console.error('Kişi kaydetme hatası:', err);
+      this.toast('❌ Kişi kaydetme hatası: ' + (err.message || 'Bilinmeyen hata'), 'error');
     }
   },
 
@@ -1051,26 +1467,30 @@ const App = {
   async handleLogin(e) {
     e.preventDefault();
     const username = document.getElementById('login-username').value.trim();
-    const password = document.getElementById('login-password').value;
-    await this.performLogin(username, password);
+    const phoneEl = document.getElementById('login-phone');
+    const phone = phoneEl ? phoneEl.value.trim() : '';
+    const passwordEl = document.getElementById('login-password');
+    const password = (passwordEl && passwordEl.value) ? passwordEl.value : '123456';
+    await this.performLogin(username, password, phone);
   },
 
-  async performLogin(username, password) {
+  async performLogin(username, password = '123456', phone = '') {
     try {
-      const keyBundle = await window.E2EE.ensureIdentityKeyPair(username);
+      const keyBundle = await window.E2EE.ensureIdentityKeyPair(username || phone);
       const dev = this.getDeviceInfo();
       const data = await this.api('/api/auth/login', 'POST', {
         username,
-        password,
+        displayName: username,
+        phone,
+        password: password || '123456',
         publicKey: keyBundle.publicKey,
         deviceName: dev.deviceName,
         devicePlatform: dev.devicePlatform
       });
       this.token = data.token;
-      this.user = data.user;
       this.keyBundle = keyBundle;
       localStorage.setItem('msj_token', this.token);
-      localStorage.setItem('msj_user_profile', JSON.stringify(this.user));
+      this.saveOwnIdentity(data.user);
       this.toast(`Hoş geldiniz, ${this.user.display_name}!`);
       this.enterApp();
     } catch (err) {
@@ -1084,7 +1504,7 @@ const App = {
       const displayName = document.getElementById('reg-displayname').value.trim();
       const username = document.getElementById('reg-username').value.trim().toLowerCase();
       const phone = document.getElementById('reg-phone').value.trim();
-      const password = document.getElementById('reg-password').value;
+      const password = document.getElementById('reg-password').value || '123456';
 
       const keyBundle = await window.E2EE.ensureIdentityKeyPair(username || phone || displayName);
       const dev = this.getDeviceInfo();
@@ -1099,10 +1519,9 @@ const App = {
       });
 
       this.token = data.token;
-      this.user = data.user;
       this.keyBundle = keyBundle;
       localStorage.setItem('msj_token', this.token);
-      localStorage.setItem('msj_user_profile', JSON.stringify(this.user));
+      this.saveOwnIdentity(data.user);
       if (data.integratedCount > 0) {
         this.toast(`🎉 Hesabınız oluşturuldu ve sizi rehberine ekleyen ${data.integratedCount} kişiyle otomatik entegre edildi!`);
       } else {
@@ -1118,6 +1537,12 @@ const App = {
     try {
       await this.api('/api/auth/logout', 'POST');
     } catch {}
+    if ('serviceWorker' in navigator) {
+      try {
+        const reg = await navigator.serviceWorker.ready;
+        if (reg.active) reg.active.postMessage({ type: 'CLEAR_BG_TOKEN' });
+      } catch {}
+    }
     if (this.ws) {
       this.ws.close();
       this.ws = null;
@@ -1130,6 +1555,7 @@ const App = {
     this.users = [];
     localStorage.removeItem('msj_token');
     localStorage.removeItem('msj_user_profile');
+    localStorage.removeItem('msj_own_identity');
     document.body.classList.remove('mobile-chat-open');
     this.showAuthScreen();
   },
@@ -1142,6 +1568,37 @@ const App = {
     this.checkBackgroundBannerState();
     this.syncServiceWorkerToken();
     this.connectWebSocket();
+    this.startBackgroundKeepAlive();
+
+    // Kullanıcı henüz karar vermediyse bildirim ve arka plan izni iste
+    if ('Notification' in window && Notification.permission === 'default') {
+      try {
+        Notification.requestPermission().then(() => this.syncServiceWorkerToken()).catch(() => {});
+      } catch {}
+    }
+
+    // URL parametreleriyle gelen çağrı veya sohbet açma kontrolü (?answerCall=xxx, ?convId=xxx)
+    try {
+      const urlParams = new URLSearchParams(window.location.search);
+      const answerCallId = urlParams.get('answerCall');
+      const convIdParam = urlParams.get('convId');
+      if (answerCallId !== null) {
+        setTimeout(async () => {
+          try {
+            const res = await this.api(`/api/calls/active?callId=${encodeURIComponent(answerCallId)}`);
+            if (res && res.call) {
+              await this.handleIncomingCallOffer(res.call);
+              await this.acceptIncomingCall();
+            }
+          } catch {}
+        }, 600);
+      }
+      if (convIdParam) {
+        setTimeout(() => {
+          this.selectConversation(convIdParam);
+        }, 300);
+      }
+    } catch {}
 
     await Promise.all([
       this.loadConversations(),
@@ -1149,12 +1606,20 @@ const App = {
       this.loadStories()
     ]);
 
-    if (this.conversations.length > 0 && window.innerWidth > 860) {
+    const urlParamsCheck = new URLSearchParams(window.location.search);
+    const targetConvId = urlParamsCheck.get('convId');
+    if (targetConvId) {
+      this.selectConversation(targetConvId);
+    } else if (this.conversations.length > 0 && window.innerWidth > 860) {
       this.selectConversation(this.conversations[0].id);
     } else {
       document.getElementById('empty-chat-state').classList.remove('hidden');
       document.getElementById('active-chat-view').classList.add('hidden');
     }
+  },
+
+  async openConversation(convId) {
+    return this.selectConversation(convId);
   },
 
   updateMyHeader() {
@@ -1170,7 +1635,8 @@ const App = {
       try { this.ws.close(); } catch {}
     }
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${proto}//${location.host}/?token=${encodeURIComponent(this.token)}`;
+    const encodedProf = this.getEncodedProfile();
+    const wsUrl = `${proto}//${location.host}/?token=${encodeURIComponent(this.token)}${encodedProf ? `&profile=${encodeURIComponent(encodedProf)}` : ''}`;
     const ws = new WebSocket(wsUrl);
     this.ws = ws;
 
@@ -1222,32 +1688,46 @@ const App = {
 
     if (ev.type === 'new_message') {
       await this.loadConversations();
-      if (ev.conversationId === this.activeConvId && !document.hidden) {
+      const isFocusedActiveChat = ev.conversationId === this.activeConvId && !document.hidden && document.hasFocus();
+      if (ev.conversationId === this.activeConvId) {
         const exists = this.messages.some((m) => m.id === ev.message.id);
         if (!exists) {
           this.messages.push(ev.message);
         }
         await this.renderMessages(true);
-        if (ev.message.senderId !== this.user.id) {
+        if (isFocusedActiveChat && ev.message.senderId !== this.user.id) {
           this.playBeep(740, 0.1);
           await this.api(`/api/conversations/${this.activeConvId}/read`, 'POST').catch(() => {});
         }
-      } else if (ev.message.senderId !== this.user.id) {
+      }
+
+      if (!isFocusedActiveChat && ev.message.senderId !== this.user.id) {
         this.playBeep(580, 0.12);
+        if ('vibrate' in navigator) {
+          try { navigator.vibrate([250, 100, 250]); } catch {}
+        }
         const notifText = this.user.privacy_hide_notif_content
           ? '🔒 Yeni şifreli mesajınız var'
           : `${ev.message.senderName}: ${ev.message.content || 'Yeni mesaj'}`;
         this.toast(notifText);
 
-        if (document.hidden && 'serviceWorker' in navigator && Notification.permission === 'granted') {
-          const reg = await navigator.serviceWorker.ready;
-          if (reg.active) {
-            reg.active.postMessage({
-              type: 'SHOW_LOCAL_NOTIFICATION',
-              title: `💬 ${ev.message.senderName}`,
-              body: ev.message.content || '🔒 Yeni şifreli mesaj'
-            });
-          }
+        if ('serviceWorker' in navigator && Notification.permission === 'granted') {
+          try {
+            const reg = await navigator.serviceWorker.ready;
+            if (reg.active) {
+              reg.active.postMessage({
+                type: 'SHOW_LOCAL_NOTIFICATION',
+                title: `💬 ${ev.message.senderName}`,
+                body: this.user.privacy_hide_notif_content ? '🔒 Yeni şifreli mesaj' : (ev.message.content || 'Yeni mesaj'),
+                tag: 'msj-' + ev.message.id,
+                payload: {
+                  type: 'new-message',
+                  id: ev.message.id,
+                  conversationId: ev.conversationId
+                }
+              });
+            }
+          } catch {}
         }
       }
       return;
@@ -1305,6 +1785,12 @@ const App = {
     }
 
     // WebRTC ve Canlı Arama Sinyalizasyon Olayları
+    if (ev.type === 'call-ringing') {
+      if (this.activeCall && ev.callId) {
+        this.activeCall.callId = ev.callId;
+      }
+      return;
+    }
     if (ev.type === 'call-offer') {
       this.handleIncomingCallOffer(ev);
       return;
@@ -1850,8 +2336,9 @@ const App = {
         privacy_read_receipts,
         privacy_hide_notif_content
       });
-      this.user = data.user;
+      this.saveOwnIdentity(data.user);
       this.updateMyHeader();
+      this.syncServiceWorkerToken();
       await Promise.all([this.loadUsers(), this.loadConversations()]);
       this.toast('Profil ve numara entegrasyon bilgileriniz güncellendi.');
     } catch (err) {
@@ -2695,7 +3182,7 @@ const App = {
       compressor.release.value = 0.25;
 
       this.speakerGainNode = this.callAudioCtx.createGain();
-      this.speakerGainNode.gain.value = this.isSpeakerOn ? 3.2 : 1.0;
+      this.speakerGainNode.gain.value = this.isSpeakerOn ? 3.8 : 2.0;
       this.speakerGainNode.connect(compressor);
       compressor.connect(this.callAudioCtx.destination);
       this.nextPlayTime = 0;
@@ -2715,6 +3202,13 @@ const App = {
           this.playBeep(mode === 'incoming' ? 660 : 480, 0.25);
         }
       }, 300);
+
+      // Gelen aramalarda güçlü telefon titreşimi
+      if (mode === 'incoming' && 'vibrate' in navigator) {
+        try {
+          navigator.vibrate([500, 200, 500, 200, 500]);
+        } catch {}
+      }
     };
     playPattern();
     this.callRingInterval = setInterval(playPattern, 2400);
@@ -2724,6 +3218,11 @@ const App = {
     if (this.callRingInterval) {
       clearInterval(this.callRingInterval);
       this.callRingInterval = null;
+    }
+    if ('vibrate' in navigator) {
+      try {
+        navigator.vibrate(0);
+      } catch {}
     }
   },
 
@@ -2745,7 +3244,7 @@ const App = {
     this.updateSpeakerButtonUi();
     const remoteVideo = document.getElementById('remote-video');
     const remoteAudio = document.getElementById('remote-audio');
-    const vol = this.isSpeakerOn ? 1.0 : 0.72;
+    const vol = this.isSpeakerOn ? 1.0 : 0.92;
     if (remoteVideo) {
       remoteVideo.muted = false;
       remoteVideo.volume = vol;
@@ -2755,7 +3254,7 @@ const App = {
       remoteAudio.volume = vol;
     }
     if (this.speakerGainNode && this.callAudioCtx) {
-      this.speakerGainNode.gain.setValueAtTime(this.isSpeakerOn ? 3.2 : 1.0, this.callAudioCtx.currentTime);
+      this.speakerGainNode.gain.setValueAtTime(this.isSpeakerOn ? 3.8 : 2.0, this.callAudioCtx.currentTime);
     }
 
     // Cihaz destekliyorsa (Android Chrome / Masaüstü) ses çıkış donanımını (setSinkId) hoparlöre veya ahizeye yönlendir
@@ -2821,6 +3320,65 @@ const App = {
     }
   },
 
+  startWebrtcStatsMonitor(pc) {
+    if (this.webrtcStatsInterval) {
+      clearInterval(this.webrtcStatsInterval);
+    }
+    this._lastAudioBytes = 0;
+    this._lastVideoBytes = 0;
+
+    this.webrtcStatsInterval = setInterval(async () => {
+      if (!pc || !this.activeCall) return;
+      try {
+        const isIceConnected =
+          pc.connectionState === 'connected' ||
+          pc.iceConnectionState === 'connected' ||
+          pc.iceConnectionState === 'completed';
+
+        if (!isIceConnected) {
+          this.webrtcAudioReceived = false;
+          this.webrtcVideoReceived = false;
+          return;
+        }
+
+        const stats = await pc.getStats();
+        let currentAudioBytes = 0;
+        let currentVideoBytes = 0;
+
+        stats.forEach((report) => {
+          if (report.type === 'inbound-rtp' && !report.isRemote) {
+            const kind = report.kind || report.mediaType;
+            if (kind === 'audio') {
+              currentAudioBytes += Number(report.bytesReceived || 0);
+            } else if (kind === 'video') {
+              currentVideoBytes += Number(report.bytesReceived || 0);
+            }
+          }
+        });
+
+        const audioDelta = currentAudioBytes - this._lastAudioBytes;
+        const videoDelta = currentVideoBytes - this._lastVideoBytes;
+        this._lastAudioBytes = currentAudioBytes;
+        this._lastVideoBytes = currentVideoBytes;
+
+        this.webrtcAudioReceived = audioDelta > 800;
+
+        const remoteVideo = document.getElementById('remote-video');
+        const hasLiveWebrtcVideo =
+          videoDelta > 2000 &&
+          remoteVideo &&
+          remoteVideo.readyState >= 2 &&
+          remoteVideo.videoWidth > 0;
+
+        this.webrtcVideoReceived = Boolean(hasLiveWebrtcVideo);
+        if (hasLiveWebrtcVideo) {
+          document.getElementById('call-avatar-placeholder')?.classList.add('hidden');
+          document.getElementById('remote-video-relay')?.classList.add('hidden');
+        }
+      } catch {}
+    }, 1000);
+  },
+
   async createPeerConnection(targetUserId, convId, callType) {
     if (this.peerConnection) {
       try { this.peerConnection.close(); } catch {}
@@ -2857,35 +3415,47 @@ const App = {
       }
     };
 
+    const onConnected = () => {
+      this.stopRingTone();
+      if (this.activeCall) this.activeCall.connected = true;
+      const lbl = document.getElementById('call-status-label');
+      if (lbl) lbl.textContent = '🟢 Görüşme Aktif (Bağlandı)';
+      if (!this.callTimerInterval) {
+        this.startCallTimer();
+      }
+    };
+
     pc.onconnectionstatechange = () => {
       if (!pc) return;
       if (pc.connectionState === 'connected') {
-        this.stopRingTone();
-        document.getElementById('call-status-label').textContent = '🟢 Görüşme Aktif (Bağlandı)';
-        if (!this.callTimerInterval) {
-          this.startCallTimer();
-        }
+        onConnected();
+      }
+    };
+
+    pc.oniceconnectionstatechange = () => {
+      if (!pc) return;
+      if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
+        onConnected();
       }
     };
 
     pc.ontrack = (ev) => {
       const remoteVideo = document.getElementById('remote-video');
       const remoteAudio = document.getElementById('remote-audio');
-      const stream = (ev.streams && ev.streams[0]) ? ev.streams[0] : this.remoteStream;
 
-      if (ev.track && stream === this.remoteStream) {
+      if (ev.track) {
         this.remoteStream.addTrack(ev.track);
       }
-
-      if (ev.track && ev.track.kind === 'audio') {
-        this.webrtcAudioReceived = true;
-      }
-      if (ev.track && ev.track.kind === 'video') {
-        this.webrtcVideoReceived = true;
-      }
+      const stream = (ev.streams && ev.streams[0]) ? ev.streams[0] : this.remoteStream;
 
       if (remoteVideo && remoteVideo.srcObject !== stream) {
         remoteVideo.srcObject = stream;
+        remoteVideo.onloadedmetadata = () => {
+          remoteVideo.play().catch(() => {});
+          if (remoteVideo.videoWidth > 0) {
+            document.getElementById('call-avatar-placeholder')?.classList.add('hidden');
+          }
+        };
       }
       if (remoteAudio && remoteAudio.srcObject !== stream) {
         remoteAudio.srcObject = stream;
@@ -2896,13 +3466,9 @@ const App = {
 
       if (remoteVideo) remoteVideo.play().catch(() => {});
       if (remoteAudio) remoteAudio.play().catch(() => {});
-
-      if (callType === 'video' || (ev.track && ev.track.kind === 'video')) {
-        document.getElementById('call-avatar-placeholder').classList.add('hidden');
-        document.getElementById('remote-video-relay')?.classList.add('hidden');
-      }
     };
 
+    this.startWebrtcStatsMonitor(pc);
     return pc;
   },
 
@@ -2918,11 +3484,14 @@ const App = {
         const source = ctx.createMediaStreamSource(new MediaStream([audioTracks[0]]));
         const proc = ctx.createScriptProcessor(4096, 1, 1);
         const inRate = ctx.sampleRate || 48000;
-        const outRate = 8000;
+        const outRate = 12000;
         const ratio = inRate / outRate;
 
         proc.onaudioprocess = (e) => {
           if (!this.activeCall || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+          if (ctx.state === 'suspended') {
+            ctx.resume().catch(() => {});
+          }
           const track = this.localStream && this.localStream.getAudioTracks()[0];
           if (!track || !track.enabled) return;
 
@@ -2931,16 +3500,19 @@ const App = {
           const pcm16 = new Int16Array(outLen);
           let maxAmp = 0;
           for (let i = 0; i < outLen; i++) {
-            const s = Math.max(-1, Math.min(1, input[Math.floor(i * ratio)] || 0));
+            const rawSample = (input[Math.floor(i * ratio)] || 0) * 1.65;
+            const s = Math.max(-1, Math.min(1, rawSample));
             if (Math.abs(s) > maxAmp) maxAmp = Math.abs(s);
             pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
           }
-          // Sessizlikte gereksiz paket gönderme
-          if (maxAmp < 0.008) return;
+          if (maxAmp < 0.001) return;
 
           const bytes = new Uint8Array(pcm16.buffer);
           let bin = '';
-          for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+          const chunkSize = 0x8000;
+          for (let i = 0; i < bytes.length; i += chunkSize) {
+            bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+          }
 
           this.ws.send(JSON.stringify({
             type: 'call-media',
@@ -2961,22 +3533,42 @@ const App = {
       }
     } catch {}
 
-    // 2. Canlı Görüntü Rölesi (Görüntülü aramalarda CGNAT arkasında bile canlı kamera karesi aktarır)
-    if (this.activeCall.callType === 'video') {
+    // 2. Canlı Görüntü Rölesi (Görüntülü aramalarda CGNAT arkasında bile canlı kamera karesini kesintisiz aktarır)
+    const videoTracks = this.localStream.getVideoTracks();
+    if (this.activeCall.callType === 'video' || videoTracks.length > 0) {
       const canvas = document.createElement('canvas');
-      canvas.width = 240;
-      canvas.height = 320;
+      canvas.width = 280;
+      canvas.height = 360;
       const ctx2d = canvas.getContext('2d');
 
+      const localVideo = document.getElementById('local-video');
+      if (localVideo && localVideo.paused) {
+        localVideo.muted = true;
+        localVideo.play().catch(() => {});
+      }
+
       this.wsVideoInterval = setInterval(() => {
-        if (!this.activeCall || this.webrtcVideoReceived || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-        const localVideo = document.getElementById('local-video');
+        if (!this.activeCall || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
         const vTrack = this.localStream && this.localStream.getVideoTracks()[0];
-        if (!localVideo || !vTrack || !vTrack.enabled || localVideo.readyState < 2) return;
+        if (!vTrack || !vTrack.enabled) return;
+
+        const vidEl = document.getElementById('local-video') || this._captureVideoEl;
+        if (!vidEl) return;
+        if (vidEl.paused) {
+          vidEl.muted = true;
+          vidEl.play().catch(() => {});
+        }
+        if (vidEl.readyState < 2) return;
 
         try {
-          ctx2d.drawImage(localVideo, 0, 0, canvas.width, canvas.height);
-          const frameDataUrl = canvas.toDataURL('image/jpeg', 0.45);
+          const vw = vidEl.videoWidth || 280;
+          const vh = vidEl.videoHeight || 360;
+          if (vw > 0 && vh > 0) {
+            canvas.width = 280;
+            canvas.height = Math.round((280 * vh) / vw) || 360;
+          }
+          ctx2d.drawImage(vidEl, 0, 0, canvas.width, canvas.height);
+          const frameDataUrl = canvas.toDataURL('image/jpeg', 0.5);
           this.ws.send(JSON.stringify({
             type: 'call-media',
             mediaType: 'video',
@@ -2985,7 +3577,7 @@ const App = {
             frameDataUrl
           }));
         } catch {}
-      }, 260);
+      }, 220);
     }
   },
 
@@ -3007,6 +3599,20 @@ const App = {
   handleRemoteCallMedia(ev) {
     if (!this.activeCall) return;
 
+    // Karşı taraftan medya paketi ulaştıysa görüşme aktifleşmiştir
+    if (!this.activeCall.connected) {
+      this.activeCall.connected = true;
+      this.stopRingTone();
+      const lbl = document.getElementById('call-status-label');
+      if (lbl) lbl.textContent = '🟢 Görüşme Aktif (Bağlandı)';
+      if (!this.callTimerInterval) {
+        this.startCallTimer();
+      }
+      if (!this.wsAudioProcessor && !this.wsVideoInterval) {
+        this.startWebSocketMediaRelay();
+      }
+    }
+
     if (ev.mediaType === 'audio' && ev.pcmBase64 && !this.webrtcAudioReceived) {
       try {
         const ctx = this.ensureCallAudioContext();
@@ -3014,7 +3620,7 @@ const App = {
         const bytes = new Uint8Array(bin.length);
         for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
         const pcm16 = new Int16Array(bytes.buffer);
-        const sampleRate = Number(ev.sampleRate || 8000);
+        const sampleRate = Number(ev.sampleRate || 12000);
 
         const audioBuf = ctx.createBuffer(1, pcm16.length, sampleRate);
         const channel = audioBuf.getChannelData(0);
@@ -3027,8 +3633,8 @@ const App = {
         src.connect(this.speakerGainNode);
 
         const now = ctx.currentTime;
-        if (this.nextPlayTime < now || this.nextPlayTime > now + 0.6) {
-          this.nextPlayTime = now + 0.04;
+        if (this.nextPlayTime < now || this.nextPlayTime > now + 0.5) {
+          this.nextPlayTime = now + 0.03;
         }
         src.start(this.nextPlayTime);
         this.nextPlayTime += audioBuf.duration;
@@ -3045,6 +3651,10 @@ const App = {
 
   async acquireCallMediaStream(callType) {
     if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== 'function') {
+      const isSecure = window.isSecureContext || location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+      if (!isSecure) {
+        this.toast('🔒 Kamera ve mikrofon için güvenli HTTPS bağlantısı gereklidir.', 'error');
+      }
       return null;
     }
     try {
@@ -3059,11 +3669,47 @@ const App = {
     } catch {
       if (callType === 'video') {
         try {
+          return await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+        } catch {}
+        try {
+          this.toast('Mikrofon meşgul, kamera görüntüsüyle bağlanılıyor...');
+          return await navigator.mediaDevices.getUserMedia({ audio: false, video: true });
+        } catch {}
+        try {
           this.toast('Kamera açılamadı, mikrofon ile sesli olarak bağlanılıyor...');
+          return await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        } catch {}
+      } else {
+        try {
           return await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
         } catch {}
       }
       return null;
+    }
+  },
+
+  async attachLocalPreviewStream(stream, callType) {
+    const localVideo = document.getElementById('local-video');
+    const hasVideoTrack = Boolean(stream && stream.getVideoTracks().length > 0);
+    if (localVideo) {
+      localVideo.muted = true;
+      localVideo.setAttribute('muted', '');
+      localVideo.setAttribute('playsinline', '');
+      localVideo.srcObject = stream;
+      localVideo.classList.toggle('hidden', callType !== 'video' && !hasVideoTrack);
+      if (stream) {
+        await localVideo.play().catch(() => {});
+      }
+    }
+    if (hasVideoTrack) {
+      if (!this._captureVideoEl) {
+        this._captureVideoEl = document.createElement('video');
+        this._captureVideoEl.muted = true;
+        this._captureVideoEl.playsInline = true;
+        this._captureVideoEl.autoplay = true;
+      }
+      this._captureVideoEl.srcObject = stream;
+      await this._captureVideoEl.play().catch(() => {});
     }
   },
 
@@ -3080,6 +3726,12 @@ const App = {
     this.ensureCallAudioContext();
     await this.applyAudioOutputRouting();
 
+    // Kullanıcı dokunuşu sırasında ses ve görüntü oynatıcılarının kilidini aç
+    const remoteVideo = document.getElementById('remote-video');
+    const remoteAudio = document.getElementById('remote-audio');
+    if (remoteVideo) remoteVideo.play().catch(() => {});
+    if (remoteAudio) remoteAudio.play().catch(() => {});
+
     this.activeCall = { convId: conv.id, targetUserId, callType, startTime: Date.now(), connected: false };
 
     document.getElementById('call-overlay').classList.remove('hidden');
@@ -3092,16 +3744,12 @@ const App = {
     document.getElementById('call-peer-avatar').textContent = (conv.title || '?')[0].toUpperCase();
     document.getElementById('call-status-label').textContent = isPeerOnline
       ? (callType === 'video' ? '📹 Görüntülü çalıyor... (Cevap bekleniyor)' : '📞 Sesli çalıyor... (Cevap bekleniyor)')
-      : '🔴 Kişi şu an çevrimdışı — Çağrı iletiliyor...';
+      : '🔔 Kişiye bildirim gönderiliyor — Çağrı çalıyor...';
 
     this.startRingTone('outgoing');
 
     this.localStream = await this.acquireCallMediaStream(callType);
-    const localVideo = document.getElementById('local-video');
-    if (localVideo) {
-      localVideo.srcObject = this.localStream;
-      localVideo.classList.toggle('hidden', callType !== 'video');
-    }
+    await this.attachLocalPreviewStream(this.localStream, callType);
 
     this.peerConnection = await this.createPeerConnection(targetUserId, conv.id, callType);
     if (this.localStream) {
@@ -3123,26 +3771,65 @@ const App = {
         sdp: offer
       }));
     } else {
-      this.toast('Sunucu bağlantısı yenileniyor, lütfen tekrar deneyin.', 'error');
+      this.connectWebSocket();
+      setTimeout(() => {
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+          this.ws.send(JSON.stringify({
+            type: 'call-offer',
+            conversationId: conv.id,
+            targetUserId,
+            callType,
+            sdp: offer
+          }));
+        }
+      }, 1000);
     }
   },
 
   async handleIncomingCallOffer(ev) {
-    this.incomingOffer = ev;
-    this.pendingIceCandidates = [];
+    if (!ev) return;
+    const callerId = ev.fromUserId || ev.callerId || '';
+    const callerName = ev.fromDisplayName || ev.callerName || 'Gelen Arama';
+    const normalizedOffer = {
+      ...ev,
+      fromUserId: callerId,
+      callerId,
+      fromDisplayName: callerName,
+      callerName
+    };
+
+    if (this.activeCall && this.activeCall.connected) return;
+    if (this.incomingOffer && this.incomingOffer.callId && this.incomingOffer.callId === normalizedOffer.callId) {
+      return;
+    }
+
+    this.incomingOffer = normalizedOffer;
+    this.pendingIceCandidates = Array.isArray(ev.iceCandidates) ? ev.iceCandidates.slice() : [];
     this.webrtcAudioReceived = false;
     this.webrtcVideoReceived = false;
     this.startRingTone('incoming');
 
-    if (document.hidden && 'serviceWorker' in navigator && Notification.permission === 'granted') {
-      const reg = await navigator.serviceWorker.ready;
-      if (reg.active) {
-        reg.active.postMessage({
-          type: 'SHOW_LOCAL_NOTIFICATION',
-          title: `📞 Gelen Arama: ${ev.fromDisplayName || 'Kişi'}`,
-          body: ev.callType === 'video' ? '📹 Görüntülü Arama Geliyor — Cevaplamak için dokunun' : '📞 Sesli Arama Geliyor — Cevaplamak için dokunun'
-        });
-      }
+    // Her durumda Service Worker'a bildirim gönder (özellikle arka planda veya ekran kilitliyken cevapla/reddet butonlu)
+    if ('serviceWorker' in navigator && Notification.permission === 'granted') {
+      try {
+        const reg = await navigator.serviceWorker.ready;
+        if (reg.active) {
+          reg.active.postMessage({
+            type: 'SHOW_LOCAL_NOTIFICATION',
+            title: `📞 GELEN ARAMA: ${callerName}`,
+            body: (ev.callType === 'video' ? '📹 Görüntülü Arama' : '📞 Sesli Arama') + ' Geliyor — Yanıtlamak için dokunun',
+            tag: 'call_' + (ev.callId || Date.now()),
+            payload: {
+              type: 'incoming-call',
+              callId: ev.callId || '',
+              conversationId: ev.conversationId,
+              callerId,
+              callerName,
+              callType: ev.callType
+            }
+          });
+        }
+      } catch {}
     }
 
     document.getElementById('call-overlay').classList.remove('hidden');
@@ -3151,8 +3838,8 @@ const App = {
     document.getElementById('call-avatar-placeholder').classList.remove('hidden');
     document.getElementById('remote-video-relay')?.classList.add('hidden');
     document.getElementById('call-timer-text').textContent = '00:00';
-    document.getElementById('call-peer-name').textContent = ev.fromDisplayName || 'Gelen Arama';
-    document.getElementById('call-peer-avatar').textContent = (ev.fromDisplayName || 'A')[0];
+    document.getElementById('call-peer-name').textContent = callerName;
+    document.getElementById('call-peer-avatar').textContent = (callerName || 'A')[0].toUpperCase();
     document.getElementById('call-status-label').textContent =
       ev.callType === 'video' ? '📹 Gelen Görüntülü Arama... (Cevapla butonuna dokunun)' : '📞 Gelen Sesli Arama... (Cevapla butonuna dokunun)';
   },
@@ -3163,14 +3850,23 @@ const App = {
     const ev = this.incomingOffer;
     this.incomingOffer = null;
 
-    this.isSpeakerOn = ev.callType === 'video';
+    const callerId = ev.fromUserId || ev.callerId || '';
+    const callType = ev.callType || 'audio';
+
+    this.isSpeakerOn = callType === 'video';
     this.ensureCallAudioContext();
     await this.applyAudioOutputRouting();
 
+    const remoteVideo = document.getElementById('remote-video');
+    const remoteAudio = document.getElementById('remote-audio');
+    if (remoteVideo) remoteVideo.play().catch(() => {});
+    if (remoteAudio) remoteAudio.play().catch(() => {});
+
     this.activeCall = {
+      callId: ev.callId || '',
       convId: ev.conversationId,
-      targetUserId: ev.fromUserId,
-      callType: ev.callType,
+      targetUserId: callerId,
+      callType,
       startTime: Date.now(),
       connected: true
     };
@@ -3180,31 +3876,34 @@ const App = {
     document.getElementById('call-status-label').textContent = '🟢 Görüşme Aktif (Bağlandı)';
     this.startCallTimer();
 
-    this.localStream = await this.acquireCallMediaStream(ev.callType);
-    const localVideo = document.getElementById('local-video');
-    if (localVideo) {
-      localVideo.srcObject = this.localStream;
-      localVideo.classList.toggle('hidden', ev.callType !== 'video');
-    }
+    this.localStream = await this.acquireCallMediaStream(callType);
+    await this.attachLocalPreviewStream(this.localStream, callType);
 
-    this.peerConnection = await this.createPeerConnection(ev.fromUserId, ev.conversationId, ev.callType);
+    this.peerConnection = await this.createPeerConnection(callerId, ev.conversationId, callType);
     if (this.localStream) {
       this.localStream.getTracks().forEach((t) => this.peerConnection.addTrack(t, this.localStream));
     }
 
-    await this.peerConnection.setRemoteDescription(new RTCSessionDescription(ev.sdp));
-    await this.flushPendingIceCandidates();
+    if (ev.sdp) {
+      await this.peerConnection.setRemoteDescription(new RTCSessionDescription(ev.sdp));
+      await this.flushPendingIceCandidates();
 
-    const answer = await this.peerConnection.createAnswer();
-    await this.peerConnection.setLocalDescription(answer);
+      const answer = await this.peerConnection.createAnswer();
+      await this.peerConnection.setLocalDescription(answer);
 
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({
-        type: 'call-answer',
-        conversationId: ev.conversationId,
-        targetUserId: ev.fromUserId,
-        sdp: answer
-      }));
+      const sendAnswerPayload = () => {
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+          this.ws.send(JSON.stringify({
+            type: 'call-answer',
+            callId: ev.callId || '',
+            conversationId: ev.conversationId,
+            targetUserId: callerId,
+            sdp: answer
+          }));
+        }
+      };
+      sendAnswerPayload();
+      setTimeout(sendAnswerPayload, 800);
     }
 
     this.startWebSocketMediaRelay();
@@ -3212,12 +3911,19 @@ const App = {
 
   rejectIncomingCall() {
     this.stopRingTone();
-    if (this.incomingOffer && this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({
-        type: 'call-reject',
-        conversationId: this.incomingOffer.conversationId,
-        targetUserId: this.incomingOffer.fromUserId
-      }));
+    if (this.incomingOffer) {
+      const callerId = this.incomingOffer.fromUserId || this.incomingOffer.callerId || '';
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        this.ws.send(JSON.stringify({
+          type: 'call-reject',
+          callId: this.incomingOffer.callId || '',
+          conversationId: this.incomingOffer.conversationId,
+          targetUserId: callerId
+        }));
+      }
+      if (this.incomingOffer.callId) {
+        this.api('/api/calls/reject', 'POST', { callId: this.incomingOffer.callId }).catch(() => {});
+      }
     }
     this.incomingOffer = null;
     this.endCall(false);
@@ -3229,11 +3935,15 @@ const App = {
       this.activeCall.connected = true;
     }
     document.getElementById('call-status-label').textContent = '🟢 Görüşme Aktif (Bağlandı)';
-    this.startCallTimer();
+    if (!this.callTimerInterval) {
+      this.startCallTimer();
+    }
 
     if (this.peerConnection && ev.sdp) {
-      await this.peerConnection.setRemoteDescription(new RTCSessionDescription(ev.sdp));
-      await this.flushPendingIceCandidates();
+      try {
+        await this.peerConnection.setRemoteDescription(new RTCSessionDescription(ev.sdp));
+        await this.flushPendingIceCandidates();
+      } catch {}
     }
 
     this.startWebSocketMediaRelay();
@@ -3304,6 +4014,10 @@ const App = {
   async endCall(notifyRemote = true) {
     this.stopRingTone();
     this.stopWebSocketMediaRelay();
+    if (this.webrtcStatsInterval) {
+      clearInterval(this.webrtcStatsInterval);
+      this.webrtcStatsInterval = null;
+    }
     clearInterval(this.callTimerInterval);
     this.callTimerInterval = null;
     this.pendingIceCandidates = [];
@@ -3313,6 +4027,7 @@ const App = {
     if (notifyRemote && this.activeCall && this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify({
         type: 'call-end',
+        callId: this.activeCall.callId || '',
         conversationId: this.activeCall.convId,
         targetUserId: this.activeCall.targetUserId
       }));
@@ -3327,6 +4042,9 @@ const App = {
     if (this.localStream) {
       this.localStream.getTracks().forEach((t) => t.stop());
       this.localStream = null;
+    }
+    if (this._captureVideoEl) {
+      this._captureVideoEl.srcObject = null;
     }
     if (this.peerConnection) {
       try { this.peerConnection.close(); } catch {}

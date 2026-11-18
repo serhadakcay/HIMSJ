@@ -1,4 +1,4 @@
-/* BUILD_VER: 700 */
+/* BUILD_VER: 720 */
 :root {
   --user-font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   --user-font-size: 14px;
@@ -1290,9 +1290,16 @@ body {
 }
 
 .remote-video {
+  position: absolute;
+  inset: 0;
   width: 100%;
   height: 100%;
   object-fit: cover;
+  z-index: 1;
+}
+
+#remote-video-relay {
+  z-index: 2;
 }
 
 .local-video {
@@ -1305,10 +1312,12 @@ body {
   object-fit: cover;
   border: 2px solid var(--primary);
   background: #000;
+  z-index: 5;
 }
 
 .call-avatar-placeholder {
   position: absolute;
+  z-index: 3;
   display: flex;
   flex-direction: column;
   align-items: center;
