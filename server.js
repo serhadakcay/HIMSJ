@@ -11,7 +11,8 @@ const {
   hashPassword,
   verifyPassword,
   generateFingerprint,
-  buildInviteLinks
+  buildInviteLinks,
+  parseRawContactsText
 } = require('./db');
 const { ensureVapidKeys, sendWebPush } = require('./push-utils');
 
@@ -20,8 +21,8 @@ const PUBLIC_DIR = path.join(__dirname, 'public');
 const CERTS_DIR = path.join(__dirname, 'certs');
 const vapidKeys = ensureVapidKeys(CERTS_DIR);
 
-const onlineSockets = new Map(); // userId -> Set<net.Socket>
-const activeCalls = new Map();   // callId -> { callId, callerId, callerName, targetUserId, callType, sdp, iceCandidates, createdAt }
+const onlineSockets = new Map();
+const activeCalls = new Map();
 
 function sendWs(socket, obj) {
   if (!socket || socket.destroyed || !socket.writable) return;
@@ -60,9 +61,7 @@ function isUserOnline(userId) {
 function broadcastPresence(userId, online) {
   db.prepare('UPDATE users SET last_seen_at = CURRENT_TIMESTAMP WHERE id = ?').run(userId);
   for (const set of onlineSockets.values()) {
-    for (const sock of set) {
-      sendWs(sock, { type: 'PRESENCE', userId, online });
-    }
+    for (const sock of set) sendWs(sock, { type: 'PRESENCE', userId, online });
   }
 }
 
@@ -109,9 +108,7 @@ function getAuthUser(req) {
   const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
   if (!token) return null;
   return db.prepare(`
-    SELECT u.* FROM sessions s
-    JOIN users u ON u.id = s.user_id
-    WHERE s.token = ?
+    SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?
   `).get(token) || null;
 }
 
@@ -167,7 +164,7 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { publicKey: vapidKeys.publicKey });
     }
 
-    // 1. KAYIT OLMA (Ad Soyad + Cep Telefonu + Şifre)
+    // 1. KAYIT OLMA
     if (pathname === '/api/auth/register' && req.method === 'POST') {
       const body = await readJsonBody(req);
       const displayName = String(body.displayName || '').trim();
@@ -177,12 +174,12 @@ const server = http.createServer(async (req, res) => {
       const publicKeyJwk = String(body.publicKeyJwk || '');
 
       if (displayName.length < 2) return sendJson(res, 400, { error: 'Ad Soyad en az 2 karakter olmalıdır.' });
-      if (normPhone.length < 8) return sendJson(res, 400, { error: 'Geçerli bir cep telefonu numarası girin.' });
+      if (normPhone.length < 7) return sendJson(res, 400, { error: 'Geçerli bir cep telefonu numarası girin.' });
       if (password.length < 4) return sendJson(res, 400, { error: 'Şifre en az 4 karakter olmalıdır.' });
 
       const existing = db.prepare('SELECT * FROM users WHERE phone_normalized = ?').get(normPhone);
       if (existing && existing.is_registered === 1) {
-        return sendJson(res, 409, { error: 'Bu telefon numarası zaten kayıtlı. Giriş Yap sekmesini kullanın.' });
+        return sendJson(res, 409, { error: 'Bu telefon numarası zaten kayıtlı. Giriş Yap sekmesinden giriş yapın.' });
       }
 
       const { hash, salt } = hashPassword(password);
@@ -190,7 +187,6 @@ const server = http.createServer(async (req, res) => {
       let userId;
 
       if (existing && existing.is_registered === 0) {
-        // Rehberden önceden eklenmiş yer tutucu hesabı gerçek hesaba dönüştür
         userId = existing.id;
         db.prepare(`
           UPDATE users
@@ -211,7 +207,7 @@ const server = http.createServer(async (req, res) => {
       integratePhoneContacts(userId, normPhone, displayName, displayPhone);
 
       const token = crypto.randomBytes(32).toString('hex');
-      db.prepare('INSERT INTO sessions (token, user_id, device_name) VALUES (?, ?, ?)').run(token, userId, String(body.deviceName || 'Web/Mobil'));
+      db.prepare('INSERT INTO sessions (token, user_id, device_name) VALUES (?, ?, ?)').run(token, userId, 'Cihaz');
       const user = db.prepare('SELECT id, display_name, phone, phone_normalized, public_key_jwk, key_fingerprint, avatar_color FROM users WHERE id = ?').get(userId);
       return sendJson(res, 201, { token, user });
     }
@@ -239,7 +235,7 @@ const server = http.createServer(async (req, res) => {
       }
 
       const token = crypto.randomBytes(32).toString('hex');
-      db.prepare('INSERT INTO sessions (token, user_id, device_name) VALUES (?, ?, ?)').run(token, userRow.id, String(body.deviceName || 'Web/Mobil'));
+      db.prepare('INSERT INTO sessions (token, user_id, device_name) VALUES (?, ?, ?)').run(token, userRow.id, 'Cihaz');
 
       return sendJson(res, 200, {
         token,
@@ -274,7 +270,6 @@ const server = http.createServer(async (req, res) => {
         });
       }
 
-      // Web Push (Program Kapalıyken Bildirim & Gelen Arama Uyandırma) Kaydı
       if (pathname === '/api/push/subscribe' && req.method === 'POST') {
         const body = await readJsonBody(req);
         const sub = body.subscription;
@@ -288,63 +283,100 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 200, { ok: true });
       }
 
-      // 3. TELEFON REHBERİNDEN VEYA NUMARADAN KİŞİ EKLEME + SMS/WHATSAPP DAVET ÜRETİMİ
+      // 3. TELEFON REHBERİ / VCF / METİN / NUMARA İLE KİŞİ EKLEME
       if (pathname === '/api/contacts/add' && req.method === 'POST') {
         const body = await readJsonBody(req);
-        const list = Array.isArray(body.contacts) ? body.contacts : [{ name: body.name, phone: body.phone }];
-        const appUrl = getPublicUrl(req);
-        const addedResults = [];
-
-        for (const item of list) {
-          const norm = normalizePhone(item.phone);
-          if (norm.length < 8) continue;
-          const dispPhone = formatPhoneDisplay(item.phone);
-          const cleanName = String(item.name || dispPhone).trim();
-
-          let target = db.prepare('SELECT * FROM users WHERE phone_normalized = ?').get(norm);
-          if (!target) {
-            const newId = 'usr_' + crypto.randomBytes(6).toString('hex');
-            const { hash, salt } = hashPassword(crypto.randomBytes(12).toString('hex'));
-            db.prepare(`
-              INSERT INTO users (id, display_name, phone, phone_normalized, password_hash, password_salt, is_registered, avatar_color)
-              VALUES (?, ?, ?, ?, ?, ?, 0, '#64748b')
-            `).run(newId, cleanName, dispPhone, norm, hash, salt);
-            target = db.prepare('SELECT * FROM users WHERE id = ?').get(newId);
-          }
-
-          if (target.id === me.id) continue;
-
-          db.prepare(`
-            INSERT INTO contacts (user_id, contact_user_id, contact_name, contact_phone, contact_phone_normalized)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(user_id, contact_user_id) DO UPDATE SET contact_name = excluded.contact_name
-          `).run(me.id, target.id, cleanName, dispPhone, norm);
-
-          const invite = buildInviteLinks({
-            targetPhone: dispPhone,
-            targetName: cleanName,
-            senderName: me.display_name,
-            senderPhone: me.phone,
-            appUrl
-          });
-
-          addedResults.push({
-            id: target.id,
-            display_name: cleanName,
-            phone: dispPhone,
-            isRegistered: Boolean(target.is_registered),
-            online: isUserOnline(target.id),
-            publicKeyJwk: target.public_key_jwk,
-            keyFingerprint: target.key_fingerprint,
-            avatarColor: target.avatar_color,
-            ...invite
-          });
+        let list = Array.isArray(body.contacts) ? body.contacts.slice() : [];
+        if (body.rawText) {
+          list.push(...parseRawContactsText(body.rawText));
+        }
+        if (list.length === 0 && (body.name || body.phone)) {
+          list.push({ name: body.name, phone: body.phone });
         }
 
-        return sendJson(res, 200, { ok: true, contacts: addedResults });
+        const appUrl = getPublicUrl(req);
+        const addedResults = [];
+        let skippedSelf = false;
+
+        for (const item of list) {
+          if (!item) continue;
+          const rawName = Array.isArray(item.name) ? item.name[0] : item.name;
+          const rawPhones = Array.isArray(item.tel) ? item.tel : (Array.isArray(item.phone) ? item.phone : [item.phone || item.tel]);
+
+          for (const rawP of rawPhones) {
+            const norm = normalizePhone(rawP);
+            if (norm.length < 7) continue;
+
+            if (norm === me.phone_normalized) {
+              skippedSelf = true;
+              continue;
+            }
+
+            const dispPhone = formatPhoneDisplay(rawP);
+            const cleanName = String(rawName || dispPhone).trim();
+
+            let target = db.prepare('SELECT * FROM users WHERE phone_normalized = ?').get(norm);
+            if (!target) {
+              const newId = 'usr_' + crypto.randomBytes(6).toString('hex');
+              const { hash, salt } = hashPassword(crypto.randomBytes(12).toString('hex'));
+              db.prepare(`
+                INSERT INTO users (id, display_name, phone, phone_normalized, password_hash, password_salt, is_registered, avatar_color)
+                VALUES (?, ?, ?, ?, ?, ?, 0, '#64748b')
+              `).run(newId, cleanName, dispPhone, norm, hash, salt);
+              target = db.prepare('SELECT * FROM users WHERE id = ?').get(newId);
+            }
+
+            db.prepare(`
+              INSERT INTO contacts (user_id, contact_user_id, contact_name, contact_phone, contact_phone_normalized)
+              VALUES (?, ?, ?, ?, ?)
+              ON CONFLICT(user_id, contact_user_id) DO UPDATE SET
+                contact_name = excluded.contact_name,
+                contact_phone = excluded.contact_phone,
+                contact_phone_normalized = excluded.contact_phone_normalized
+            `).run(me.id, target.id, cleanName, dispPhone, norm);
+
+            // Karşı taraf kayıtlıysa onun rehberine de otomatik entegre et
+            if (target.is_registered === 1) {
+              db.prepare(`
+                INSERT INTO contacts (user_id, contact_user_id, contact_name, contact_phone, contact_phone_normalized)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(user_id, contact_user_id) DO NOTHING
+              `).run(target.id, me.id, me.display_name, me.phone, me.phone_normalized);
+            }
+
+            const invite = buildInviteLinks({
+              targetPhone: dispPhone,
+              targetName: cleanName,
+              senderName: me.display_name,
+              senderPhone: me.phone,
+              appUrl
+            });
+
+            addedResults.push({
+              id: target.id,
+              display_name: cleanName,
+              phone: dispPhone,
+              isRegistered: Boolean(target.is_registered),
+              online: isUserOnline(target.id),
+              publicKeyJwk: target.public_key_jwk,
+              keyFingerprint: target.key_fingerprint,
+              avatarColor: target.avatar_color,
+              ...invite
+            });
+          }
+        }
+
+        if (addedResults.length === 0) {
+          if (skippedSelf) {
+            return sendJson(res, 400, { error: 'Kendi telefon numaranızı kişi olarak ekleyemezsiniz.' });
+          }
+          return sendJson(res, 400, { error: 'Geçerli bir telefon numarası bulunamadı. Lütfen en az 7 haneli numara girin.' });
+        }
+
+        return sendJson(res, 200, { ok: true, count: addedResults.length, contacts: addedResults });
       }
 
-      // 4. REHBER LİSTESİNİ GETİR
+      // 4. REHBER LİSTESİ
       if (pathname === '/api/contacts' && req.method === 'GET') {
         const appUrl = getPublicUrl(req);
         const rows = db.prepare(`
@@ -380,7 +412,7 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 200, { contacts });
       }
 
-      // 5. ŞİFRELİ MESAJ GEÇMİŞİ VE GÖNDERİMİ (Zero-Knowledge: Sunucu plaintext görmez)
+      // 5. ŞİFRELİ MESAJLAŞMA
       const msgMatch = pathname.match(/^\/api\/messages\/([^/]+)$/);
       if (msgMatch) {
         const peerId = msgMatch[1];
@@ -412,7 +444,6 @@ const server = http.createServer(async (req, res) => {
           const savedMsg = db.prepare('SELECT * FROM messages WHERE id = ?').get(msgId);
           sendToUser(peerId, { type: 'NEW_ENCRYPTED_MESSAGE', senderName: me.display_name, message: savedMsg });
 
-          // Kapalı olsa bile ekrana bildirim düşürmek için VAPID Web Push gönder
           triggerPushToUser(peerId, {
             type: 'new-message',
             senderId: me.id,
@@ -437,7 +468,6 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
-    // Statik Dosyalar
     const reqPath = pathname === '/' ? '/index.html' : pathname;
     const safePath = path.normalize(reqPath).replace(/^(\.\.([/\\]))+/, '');
     const filePath = path.join(PUBLIC_DIR, safePath);
@@ -455,13 +485,11 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-// --- RFC 6455 WebSocket (Anlık Mesajlaşma ve WebRTC Sesli/Görüntülü Arama Sinyalizasyonu) ---
+// WebSocket Sinyalizasyon
 server.on('upgrade', (req, socket) => {
   const parsedUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   const token = parsedUrl.searchParams.get('token') || '';
-  const me = db.prepare(`
-    SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?
-  `).get(token);
+  const me = db.prepare('SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?').get(token);
 
   if (!me) {
     socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
@@ -528,12 +556,7 @@ server.on('upgrade', (req, socket) => {
             sendWs(socket, { type: 'PONG' });
           } else if (['CALL_OFFER', 'CALL_ANSWER', 'ICE_CANDIDATE', 'CALL_REJECT', 'CALL_END'].includes(msg.type)) {
             const callId = msg.callId || ('call_' + crypto.randomBytes(6).toString('hex'));
-            const packet = {
-              ...msg,
-              callId,
-              fromUserId: me.id,
-              fromDisplayName: me.display_name
-            };
+            const packet = { ...msg, callId, fromUserId: me.id, fromDisplayName: me.display_name };
 
             if (msg.type === 'CALL_OFFER') {
               activeCalls.set(callId, {
@@ -547,7 +570,6 @@ server.on('upgrade', (req, socket) => {
                 createdAt: Date.now()
               });
 
-              // Program kapalı olsa bile normal telefon araması gibi uyandıran Web Push
               triggerPushToUser(msg.targetUserId, {
                 type: 'incoming-call',
                 callId,
@@ -587,5 +609,5 @@ server.on('upgrade', (req, socket) => {
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 NexusChat E2EE Sunucusu Çalışıyor -> Port: ${PORT}`);
+  console.log(`🚀 NexusChat v4 Sunucusu Çalışıyor -> Port: ${PORT}`);
 });

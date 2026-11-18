@@ -2,12 +2,15 @@
 <html lang="tr">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
   <meta name="theme-color" content="#0b141a" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
-  <title>NexusChat — Uçtan Uca Şifreli Mesajlaşma ve Görüntülü Arama</title>
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="NexusChat" />
+  <title>NexusChat — Uçtan Uca Şifreli Mesajlaşma ve Arama</title>
   <link rel="manifest" href="/manifest.json" />
   <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+  <link rel="apple-touch-icon" href="/icon.svg" />
   <style>
     :root {
       --bg: #0b141a; --panel: #111b21; --header: #202c33; --input: #2a3942;
@@ -19,16 +22,16 @@
     .hidden { display: none !important; }
 
     /* Giriş & Kayıt Kartı */
-    #authScreen { margin: auto; width: 92%; max-width: 420px; background: var(--panel); padding: 26px; border-radius: 16px; border: 1px solid var(--border); box-shadow: 0 12px 32px rgba(0,0,0,0.5); }
+    #authScreen { margin: auto; width: 92%; max-width: 430px; background: var(--panel); padding: 24px; border-radius: 16px; border: 1px solid var(--border); box-shadow: 0 12px 32px rgba(0,0,0,0.5); max-height: 94dvh; overflow-y: auto; }
     #authScreen h1 { color: var(--accent); font-size: 22px; margin-bottom: 6px; }
-    #authScreen p { color: var(--muted); font-size: 13px; margin-bottom: 16px; }
+    #authScreen p { color: var(--muted); font-size: 13px; margin-bottom: 14px; }
     .tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; background: var(--bg); padding: 4px; border-radius: 10px; margin-bottom: 14px; }
     .tab { padding: 9px; border: none; border-radius: 8px; background: transparent; color: var(--muted); font-weight: 700; cursor: pointer; }
     .tab.active { background: var(--header); color: var(--text); }
-    input, select, button { width: 100%; padding: 12px 14px; border-radius: 10px; border: 1px solid var(--border); background: var(--input); color: var(--text); font-size: 15px; margin-bottom: 10px; outline: none; }
+    input, select, textarea, button { width: 100%; padding: 12px 14px; border-radius: 10px; border: 1px solid var(--border); background: var(--input); color: var(--text); font-size: 15px; margin-bottom: 10px; outline: none; }
     button { background: var(--accent); color: #0b141a; font-weight: 700; border: none; cursor: pointer; }
     .btn-sec { background: var(--input); color: var(--text); border: 1px solid var(--border); }
-    .btn-sm { width: auto; padding: 7px 12px; font-size: 12.5px; margin: 0; }
+    .btn-sm { width: auto; padding: 7px 11px; font-size: 12.5px; margin: 0; }
 
     /* Ana Ekran */
     #appScreen { display: flex; flex: 1; height: 100%; overflow: hidden; }
@@ -59,9 +62,13 @@
     .composer select, .composer button { width: auto; margin: 0; }
 
     /* Modallar */
-    .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,0.72); display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 100; }
-    .modal { width: 100%; max-width: 440px; background: var(--panel); border-radius: 16px; padding: 20px; border: 1px solid var(--border); }
+    .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,0.75); display: flex; align-items: center; justify-content: center; padding: 14px; z-index: 100; }
+    .modal { width: 100%; max-width: 460px; max-height: 90dvh; overflow-y: auto; background: var(--panel); border-radius: 16px; padding: 20px; border: 1px solid var(--border); }
     .modal h3 { margin-bottom: 12px; color: var(--accent); }
+    .install-card { background: var(--header); padding: 14px; border-radius: 12px; margin-bottom: 12px; border: 1px solid var(--border); }
+    .install-card h4 { margin-bottom: 6px; font-size: 15px; }
+    .install-card p, .install-card li { font-size: 13px; color: var(--muted); line-height: 1.5; }
+    .install-card ol { margin-left: 18px; margin-top: 6px; }
 
     /* Tam Ekran Sesli / Görüntülü Arama Ekranı */
     #callScreen { position: fixed; inset: 0; background: #070b0e; z-index: 200; display: flex; flex-direction: column; justify-content: space-between; padding: 24px; text-align: center; }
@@ -82,6 +89,9 @@
   </style>
 </head>
 <body>
+
+  <!-- Gizli Rehber (.vcf) Dosya Seçici (iOS & Android Tüm Cihazlar) -->
+  <input type="file" id="vcfFileInput" accept=".vcf,.vcard,text/vcard,text/x-vcard,*/*" multiple class="hidden" />
 
   <!-- 1. Şifreli Giriş & Kayıt Ekranı -->
   <div id="authScreen">
@@ -104,18 +114,21 @@
       <input type="password" id="regPass" placeholder="Şifre Belirleyin (En az 4 karakter)" required />
       <button type="submit">✨ Hesap Oluştur ve Anahtar Üret</button>
     </form>
+
+    <button type="button" class="btn-sec" id="openInstallFromAuthBtn" style="margin-top:4px;">📲 Telefona (iOS & Android) ve Bilgisayara Kur</button>
   </div>
 
   <!-- 2. Ana Sohbet Uygulaması -->
   <div id="appScreen" class="hidden">
     <aside class="sidebar">
       <div class="top-bar">
-        <div>
+        <div style="min-width:0;">
           <strong id="myNameLabel">Ben</strong>
           <div style="font-size:11px;color:var(--muted);" id="myPhoneLabel"></div>
         </div>
-        <div style="display:flex;gap:6px;">
-          <button class="btn-sm" id="openAddContactBtn">➕ Kişi Ekle</button>
+        <div style="display:flex;gap:5px;flex-shrink:0;">
+          <button class="btn-sm" id="openAddContactBtn">➕ Kişi</button>
+          <button class="btn-sm btn-sec" id="openInstallBtn" title="Telefona Kur">📲 Kur</button>
           <button class="btn-sm btn-sec" id="logoutBtn" title="Çıkış">🚪</button>
         </div>
       </div>
@@ -162,24 +175,68 @@
     </section>
   </div>
 
-  <!-- 3. Telefon Rehberi / Numara ile Kişi Ekleme Modalı -->
+  <!-- 3. Telefon Rehberi (Android + iOS + VCF + Manuel) Kişi Ekleme Modalı -->
   <div id="addContactModal" class="modal-bg hidden">
     <div class="modal">
       <h3>📒 Rehberden veya Numaradan Kişi Ekle</h3>
-      <button type="button" id="pickFromPhoneBtn" style="background:#0284c7;color:#fff;">📱 Telefon Rehberinden Kişi Seç</button>
-      <div style="text-align:center;font-size:12px;color:var(--muted);margin:6px 0;">— veya numarayı elle girin —</div>
-      <form id="manualContactForm">
-        <input type="text" id="newContactName" placeholder="Kişi Adı (Örn: Ahmet Yılmaz)" required />
-        <input type="tel" id="newContactPhone" placeholder="Cep Telefonu (Örn: 0532 111 22 33)" required />
-        <div style="display:flex;gap:8px;">
-          <button type="button" class="btn-sec" id="closeAddModalBtn">İptal</button>
-          <button type="submit">Kaydet & Davet Bağlantısı Oluştur</button>
+
+      <div class="install-card" style="padding:12px;">
+        <h4 style="color:#38bdf8;">1. Telefon Rehberinden Aktar (Android & iOS)</h4>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px;">
+          <button type="button" id="pickFromPhoneBtn" class="btn-sm" style="width:100%;background:#0284c7;color:#fff;">📱 Android Rehber Seç</button>
+          <button type="button" id="pickVcfFileBtn" class="btn-sm btn-sec" style="width:100%;">📂 iPhone / .vcf Dosyası</button>
         </div>
+      </div>
+
+      <form id="manualContactForm" class="install-card" style="padding:12px;">
+        <h4 style="color:var(--accent);">2. Numara ile Hızlı Ekle</h4>
+        <input type="text" id="newContactName" placeholder="Kişi Adı (Örn: Ahmet Yılmaz)" style="margin-top:6px;" />
+        <input type="tel" id="newContactPhone" placeholder="Cep Telefonu (Örn: 0532 111 22 33)" required />
+        <button type="submit" style="margin-bottom:0;">💾 Kaydet & Davet Bağlantısı Oluştur</button>
       </form>
+
+      <div class="install-card" style="padding:12px;">
+        <h4>3. Toplu Numara Yapıştır</h4>
+        <textarea id="bulkPasteInput" rows="2" placeholder="Her satıra bir kişi yazın:&#10;Ali Veli 0532 111 22 33" style="margin-top:6px;"></textarea>
+        <button type="button" id="bulkPasteBtn" class="btn-sec" style="margin-bottom:0;">📥 Yapıştırılanları Ekle</button>
+      </div>
+
+      <button type="button" class="btn-sec" id="closeAddModalBtn" style="margin-bottom:0;">Kapat</button>
     </div>
   </div>
 
-  <!-- 4. SMS & WhatsApp Davet Gönderme Modalı -->
+  <!-- 4. Android & iOS (iPhone) Kurulum Sihirbazı Modalı -->
+  <div id="installModal" class="modal-bg hidden">
+    <div class="modal">
+      <h3>📲 Cep Telefonuna (iOS & Android) Kurulum</h3>
+
+      <!-- Android Kurulumu -->
+      <div class="install-card">
+        <h4 style="color:#22c55e;">🤖 Android (Chrome / Samsung Internet)</h4>
+        <p>Uygulamayı ana ekranınıza gerçek uygulama simgesi olarak yükleyin:</p>
+        <button type="button" id="androidDirectInstallBtn" style="margin-top:8px;background:#16a34a;color:#fff;">⬇️ Android'e Şimdi Yükle</button>
+        <ol id="androidManualSteps">
+          <li>Sağ üst köşedeki <strong>⋮ (Üç Nokta)</strong> menüsüne dokunun.</li>
+          <li><strong>"Ana ekrana ekle"</strong> veya <strong>"Uygulamayı yükle"</strong> seçeneğine basın.</li>
+        </ol>
+      </div>
+
+      <!-- iOS (iPhone / iPad) Kurulumu -->
+      <div class="install-card">
+        <h4 style="color:#38bdf8;">🍏 iPhone & iPad (iOS Safari)</h4>
+        <p>Apple cihazlarda uygulama kurulumu Safari üzerinden 3 adımda yapılır:</p>
+        <ol>
+          <li>Bu sayfayı <strong>Safari</strong> tarayıcısında açın.</li>
+          <li>Alt ortadaki <strong>Paylaş (⬆️ Kare içinde yukarı ok)</strong> simgesine dokunun.</li>
+          <li>Açılan menüden <strong>"Ana Ekrana Ekle" (Add to Home Screen)</strong> seçeneğine dokunup <strong>Ekle</strong> deyin.</li>
+        </ol>
+      </div>
+
+      <button type="button" class="btn-sec" id="closeInstallModalBtn" style="margin-bottom:0;">Kapat</button>
+    </div>
+  </div>
+
+  <!-- 5. SMS & WhatsApp Davet Gönderme Modalı -->
   <div id="inviteModal" class="modal-bg hidden">
     <div class="modal">
       <h3>📲 Kişiyi Programa Davet Et</h3>
@@ -188,11 +245,11 @@
         <a id="inviteWaLink" target="_blank" style="flex:1;text-align:center;padding:12px;background:#16a34a;color:#fff;border-radius:10px;text-decoration:none;font-weight:700;">🟢 WhatsApp'tan Gönder</a>
         <a id="inviteSmsLink" style="flex:1;text-align:center;padding:12px;background:#0284c7;color:#fff;border-radius:10px;text-decoration:none;font-weight:700;">📩 SMS ile Gönder</a>
       </div>
-      <button type="button" class="btn-sec" id="closeInviteModalBtn">Kapat</button>
+      <button type="button" class="btn-sec" id="closeInviteModalBtn" style="margin-bottom:0;">Kapat</button>
     </div>
   </div>
 
-  <!-- 5. Tam Ekran Sesli / Görüntülü Arama Ekranı -->
+  <!-- 6. Tam Ekran Sesli / Görüntülü Arama Ekranı -->
   <div id="callScreen" class="hidden">
     <div>
       <span style="background:rgba(0,168,132,0.2);color:var(--accent);padding:4px 12px;border-radius:16px;font-size:12px;">🔒 Uçtan Uca Şifreli WebRTC Arama</span>
@@ -205,7 +262,7 @@
       <video id="localVideo" autoplay playsinline muted></video>
     </div>
 
-    <div class="call-actions" id="incomingCallControls" class="hidden">
+    <div class="call-actions hidden" id="incomingCallControls">
       <button class="call-btn" id="acceptCallBtn">📞 Cevapla</button>
       <button class="call-btn btn-red" id="rejectCallBtn">❌ Reddet</button>
     </div>

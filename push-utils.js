@@ -1,8 +1,3 @@
-/**
- * Sıfır Bağımlılıklı RFC 8291 / RFC 8292 Web Push (VAPID ES256 + aes128gcm) Motoru
- * Uygulama tamamen kapalıyken dahi telefon ve bilgisayara mesaj ve gelen arama bildirimi gönderir.
- */
-
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
@@ -10,9 +5,7 @@ const https = require('node:https');
 const http = require('node:http');
 
 function ensureVapidKeys(certsDir) {
-  if (!fs.existsSync(certsDir)) {
-    fs.mkdirSync(certsDir, { recursive: true });
-  }
+  if (!fs.existsSync(certsDir)) fs.mkdirSync(certsDir, { recursive: true });
   const vapidFile = path.join(certsDir, 'vapid.json');
   if (fs.existsSync(vapidFile)) {
     try {

@@ -1,7 +1,13 @@
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
 
-// Uygulama tamamen kapalıyken dahi VAPID Web Push sinyaliyle uyanır
+self.addEventListener('fetch', (event) => {
+  if (event.request.method !== 'GET' || event.request.url.includes('/api/')) return;
+  event.respondWith(
+    fetch(event.request).catch(() => caches.match(event.request))
+  );
+});
+
 self.addEventListener('push', (event) => {
   event.waitUntil((async () => {
     let data = {};

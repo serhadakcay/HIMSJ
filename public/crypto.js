@@ -2,8 +2,8 @@ class NexusE2EE {
   constructor() {
     this.keyPair = null;
     this.publicKeyJwkStr = '';
-    this.sessions = new Map(); // peerId -> { sendChain, recvChain, sendNum, recvNum, skipped }
-    this.plainCache = new Map(); // msgId -> decryptedObject
+    this.sessions = new Map();
+    this.plainCache = new Map();
   }
 
   async initForUser(phoneNorm) {
@@ -45,8 +45,8 @@ class NexusE2EE {
     const peerPub = await crypto.subtle.importKey('jwk', peerJwk, { name: 'ECDH', namedCurve: 'P-256' }, false, []);
 
     const shared = await crypto.subtle.deriveBits({ name: 'ECDH', public: peerPub }, this.keyPair.privateKey, 256);
-    const chainA = await this._hkdf(shared, 'Nexus-v3-ChainA');
-    const chainB = await this._hkdf(shared, 'Nexus-v3-ChainB');
+    const chainA = await this._hkdf(shared, 'Nexus-v4-ChainA');
+    const chainB = await this._hkdf(shared, 'Nexus-v4-ChainB');
     const isLower = myJwk.x < peerJwk.x;
 
     const state = {

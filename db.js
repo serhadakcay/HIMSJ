@@ -1,12 +1,3 @@
-/**
- * Sıfır Bağımlılıklı Yerleşik SQLite Veritabanı Katmanı (Node.js node:sqlite)
- * - Telefon numarası normalizasyonu ve otomatik hesap eşleştirme
- * - Kullanıcı hesapları, şifreli parola doğrulama (scrypt) ve E2EE açık anahtar dizini
- * - Telefon rehberi kayıtları ve SMS / WhatsApp davet bağlantısı üretimi
- * - Sıfır-Bilgi (Zero-Knowledge) şifreli mesaj deposu (Sunucu plaintext saklamaz)
- * - Kapalıyken bildirim ve arama uyandırma için Web Push (VAPID) abonelikleri
- */
-
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
@@ -88,7 +79,8 @@ db.exec(`
 
 function normalizePhone(rawPhone) {
   if (!rawPhone) return '';
-  let digits = String(rawPhone).replace(/\D/g, '');
+  const cleaned = String(rawPhone).replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, '').trim();
+  let digits = cleaned.replace(/\D/g, '');
   if (!digits) return '';
   if (digits.startsWith('00')) digits = digits.slice(2);
   if (digits.length === 10 && !digits.startsWith('90')) digits = '90' + digits;
@@ -148,6 +140,74 @@ function buildInviteLinks({ targetPhone, targetName, senderName, senderPhone, ap
   };
 }
 
+function decodeQuotedPrintable(linePrefix, rawVal) {
+  let val = String(rawVal || '').trim();
+  if (/ENCODING=QUOTED-PRINTABLE/i.test(linePrefix)) {
+    try {
+      const bytes = [];
+      for (let i = 0; i < val.length; i++) {
+        if (val[i] === '=' && /^[0-9A-Fa-f]{2}$/.test(val.slice(i + 1, i + 3))) {
+          bytes.push(parseInt(val.slice(i + 1, i + 3), 16));
+          i += 2;
+        } else {
+          bytes.push(val.charCodeAt(i));
+        }
+      }
+      val = Buffer.from(bytes).toString('utf8').trim();
+    } catch {}
+  }
+  return val;
+}
+
+function parseRawContactsText(rawText) {
+  const text = String(rawText || '').trim();
+  if (!text) return [];
+  const results = [];
+
+  if (/BEGIN:VCARD/i.test(text)) {
+    const unfolded = text.replace(/=\r?\n/g, '').replace(/\r?\n[ \t]/g, '');
+    const cards = unfolded.split(/BEGIN:VCARD/i).slice(1);
+    for (const card of cards) {
+      let name = '';
+      const phones = [];
+      for (const line of card.split(/\r?\n/)) {
+        if (/^(?:item\d+\.)?FN(?:;|:)/i.test(line)) {
+          const idx = line.indexOf(':');
+          if (idx !== -1) name = decodeQuotedPrintable(line.slice(0, idx), line.slice(idx + 1)) || name;
+        } else if (!name && /^(?:item\d+\.)?N(?:;|:)/i.test(line)) {
+          const idx = line.indexOf(':');
+          if (idx !== -1) {
+            const parts = decodeQuotedPrintable(line.slice(0, idx), line.slice(idx + 1)).split(';').map((s) => s.trim()).filter(Boolean);
+            if (parts.length > 0) name = parts.reverse().join(' ');
+          }
+        } else if (/^(?:item\d+\.)?TEL(?:;|:)/i.test(line)) {
+          const idx = line.indexOf(':');
+          if (idx !== -1) {
+            const tel = decodeQuotedPrintable(line.slice(0, idx), line.slice(idx + 1)).replace(/^tel:/i, '').trim();
+            if (tel) phones.push(tel);
+          }
+        }
+      }
+      for (const p of phones) {
+        results.push({ name: name || formatPhoneDisplay(p), phone: p });
+      }
+    }
+    return results;
+  }
+
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const match = trimmed.match(/(?:\+|00)?\d[\d\s().-]{5,20}\d/);
+    if (match) {
+      const phoneStr = match[0].trim();
+      const namePart = trimmed.replace(match[0], '').replace(/^[\s,:;-]+|[\s,:;-]+$/g, '').trim();
+      results.push({ name: namePart || formatPhoneDisplay(phoneStr), phone: phoneStr });
+    }
+  }
+  return results;
+}
+
 module.exports = {
   db,
   normalizePhone,
@@ -155,5 +215,6 @@ module.exports = {
   hashPassword,
   verifyPassword,
   generateFingerprint,
-  buildInviteLinks
+  buildInviteLinks,
+  parseRawContactsText
 };

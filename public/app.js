@@ -4,6 +4,7 @@ let me = null;
 let ws = null;
 let contacts = [];
 let activePeer = null;
+let deferredInstallPrompt = null;
 
 // WebRTC Arama Durumu
 let pc = null;
@@ -13,7 +14,36 @@ let incomingOffer = null;
 let pendingCandidates = [];
 let ringInterval = null;
 
-// Service Worker Kaydı ve Bildirim Tıklama Dinleyicisi
+// Android / Masaüstü PWA Yükleme İstemini Yakala
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  deferredInstallPrompt = e;
+});
+
+document.getElementById('openInstallBtn').onclick = () => {
+  document.getElementById('installModal').classList.remove('hidden');
+};
+document.getElementById('openInstallFromAuthBtn').onclick = () => {
+  document.getElementById('installModal').classList.remove('hidden');
+};
+document.getElementById('closeInstallModalBtn').onclick = () => {
+  document.getElementById('installModal').classList.add('hidden');
+};
+
+document.getElementById('androidDirectInstallBtn').onclick = async () => {
+  if (deferredInstallPrompt) {
+    deferredInstallPrompt.prompt();
+    const res = await deferredInstallPrompt.userChoice;
+    if (res.outcome === 'accepted') {
+      document.getElementById('installModal').classList.add('hidden');
+    }
+    deferredInstallPrompt = null;
+  } else {
+    alert('Tarayıcınızın sağ üst köşesindeki ⋮ (Üç Nokta) menüsüne dokunup "Ana ekrana ekle" veya "Uygulamayı yükle" seçeneğine basın.');
+  }
+};
+
+// Service Worker Kaydı
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/sw.js').catch(() => {});
   navigator.serviceWorker.addEventListener('message', async (ev) => {
@@ -107,7 +137,6 @@ document.getElementById('logoutBtn').onclick = () => {
   location.reload();
 };
 
-// Otomatik Oturum Açma
 (async () => {
   if (!token) return;
   try {
@@ -142,9 +171,8 @@ async function startApp() {
   }
 }
 
-// Program Kapalıyken Bildirim ve Arama Alma (VAPID Web Push)
 document.getElementById('enablePushBtn').onclick = async () => {
-  if (!('Notification' in window)) return alert('Tarayıcınız bildirimleri desteklemiyor.');
+  if (!('Notification' in window)) return alert('Tarayıcınız bildirimleri desteklemiyor. iOS için önce Ana Ekrana Ekle yapın.');
   const perm = await Notification.requestPermission();
   if (perm === 'granted') {
     document.getElementById('pushBanner').classList.add('hidden');
@@ -231,7 +259,7 @@ function connectWebSocket() {
   };
 }
 
-// --- REHBER VE DAVET İŞLEMLERİ ---
+// --- REHBER VE KİŞİ EKLEME (DÜZELTİLMİŞ ÇOKLU FORMAT) ---
 async function loadContacts() {
   const data = await api('/api/contacts');
   contacts = data.contacts || [];
@@ -242,7 +270,7 @@ function renderContacts() {
   const listEl = document.getElementById('contactList');
   listEl.innerHTML = '';
   if (contacts.length === 0) {
-    listEl.innerHTML = '<div style="padding:24px;text-align:center;color:var(--muted);font-size:13px;">Henüz kişi eklemediniz. Sağ üstten <b>➕ Kişi Ekle</b> butonuna basın.</div>';
+    listEl.innerHTML = '<div style="padding:24px;text-align:center;color:var(--muted);font-size:13px;">Henüz kişi eklemediniz. Sağ üstten <b>➕ Kişi</b> butonuna basın.</div>';
     return;
   }
 
@@ -273,40 +301,86 @@ document.getElementById('closeAddModalBtn').onclick = () => {
   document.getElementById('addContactModal').classList.add('hidden');
 };
 
-// Cep Telefonu Rehberinden Doğrudan Seçim (Contact Picker API)
-document.getElementById('pickFromPhoneBtn').onclick = async () => {
-  if (!('contacts' in navigator && 'select' in navigator.contacts)) {
-    return alert('Tarayıcınız doğrudan rehber seçiciyi desteklemiyor (Android Chrome gerektirir). Aşağıdaki kutuya numarayı elle yazabilirsiniz.');
+// 1. Android Chrome Contact Picker API (User Gesture korunarak doğrudan çağrılır)
+document.getElementById('pickFromPhoneBtn').onclick = () => {
+  if (!window.isSecureContext) {
+    return alert('Telefon rehberine erişmek için sayfanın HTTPS adresinden açılması gerekir.');
   }
-  try {
-    const picked = await navigator.contacts.select(['name', 'tel'], { multiple: false });
-    if (!picked || picked.length === 0) return;
-    const name = (picked[0].name && picked[0].name[0]) || '';
-    const phone = (picked[0].tel && picked[0].tel[0]) || '';
-    await saveNewContacts([{ name, phone }]);
-  } catch (err) {
-    alert('Rehber açılamadı: ' + err.message);
+  if (navigator.contacts && typeof navigator.contacts.select === 'function') {
+    navigator.contacts.select(['name', 'tel'], { multiple: true })
+      .then(async (picked) => {
+        if (!picked || picked.length === 0) return;
+        const formatted = [];
+        for (const item of picked) {
+          const n = (item.name && item.name[0]) || '';
+          const tels = item.tel || [];
+          for (const t of tels) {
+            if (t) formatted.push({ name: n, phone: t });
+          }
+        }
+        if (formatted.length === 0) {
+          return alert('Seçilen kişide telefon numarası bulunamadı.');
+        }
+        await saveNewContacts({ contacts: formatted });
+      })
+      .catch((err) => {
+        if (err.name !== 'AbortError') {
+          alert('Rehber açılamadı: ' + err.message + '. Aşağıdan numara yazarak ekleyebilirsiniz.');
+        }
+      });
+  } else {
+    alert('Bu cihaz/tarayıcı doğrudan rehber penceresini desteklemiyor (iPhone Safari vb.). "iPhone / .vcf Dosyası" butonunu veya aşağıdaki numara kutusunu kullanın.');
   }
 };
 
+// 2. iOS (iPhone) ve Android .vcf Kişi Kartı Aktarımı
+document.getElementById('pickVcfFileBtn').onclick = () => {
+  document.getElementById('vcfFileInput').click();
+};
+
+document.getElementById('vcfFileInput').onchange = async (e) => {
+  const files = Array.from(e.target.files || []);
+  e.target.value = '';
+  if (files.length === 0) return;
+
+  let allText = '';
+  for (const f of files) {
+    allText += '\n' + (await f.text());
+  }
+  await saveNewContacts({ rawText: allText });
+};
+
+// 3. Manuel Tekli Ekleme
 document.getElementById('manualContactForm').onsubmit = async (e) => {
   e.preventDefault();
   const name = document.getElementById('newContactName').value.trim();
   const phone = document.getElementById('newContactPhone').value.trim();
-  await saveNewContacts([{ name, phone }]);
+  await saveNewContacts({ contacts: [{ name, phone }] });
   document.getElementById('newContactName').value = '';
   document.getElementById('newContactPhone').value = '';
 };
 
-async function saveNewContacts(list) {
-  const res = await api('/api/contacts/add', 'POST', { contacts: list });
-  document.getElementById('addContactModal').classList.add('hidden');
-  await loadContacts();
+// 4. Toplu Metin Yapıştırma
+document.getElementById('bulkPasteBtn').onclick = async () => {
+  const rawText = document.getElementById('bulkPasteInput').value.trim();
+  if (!rawText) return alert('Lütfen en az bir numara yazın.');
+  await saveNewContacts({ rawText });
+  document.getElementById('bulkPasteInput').value = '';
+};
 
-  if (res.contacts && res.contacts.length > 0) {
-    const added = res.contacts[0];
-    openChat(added);
-    showInviteModal(added);
+async function saveNewContacts(payload) {
+  try {
+    const res = await api('/api/contacts/add', 'POST', payload);
+    document.getElementById('addContactModal').classList.add('hidden');
+    await loadContacts();
+
+    if (res.contacts && res.contacts.length > 0) {
+      const added = res.contacts[0];
+      openChat(added);
+      showInviteModal(added);
+    }
+  } catch (err) {
+    alert(err.message);
   }
 }
 
@@ -437,7 +511,7 @@ document.getElementById('fileInput').onchange = (e) => {
   reader.readAsDataURL(file);
 };
 
-// --- GERÇEK ZAMANLI SESLİ VE GÖRÜNTÜLÜ ARAMA (WebRTC) ---
+// --- GERÇEK ZAMANLI SESLİ VE GÖRÜNTÜLÜ ARAMA ---
 function startRingtone() {
   stopRingtone();
   const beep = () => {
