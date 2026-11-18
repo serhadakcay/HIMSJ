@@ -117,7 +117,7 @@ const App = {
             }
           }
         });
-        const reg = await navigator.serviceWorker.register('/sw.js?v=6.1');
+        const reg = await navigator.serviceWorker.register('/sw.js?v=7.0');
         reg.update().catch(() => {});
         if (this.token && reg.active) {
           reg.active.postMessage({ type: 'SET_BG_TOKEN', token: this.token });
@@ -408,6 +408,11 @@ const App = {
         })
         .then(async (selected) => {
           if (!selected || (Array.isArray(selected) && selected.length === 0)) {
+            const modal = document.getElementById('contact-modal');
+            if (modal && modal.classList.contains('hidden')) {
+              this.openContactModal();
+            }
+            this.toast('⚠️ Numara seçilmedi: Cem ORTİ (+2 numara) gibi birden fazla numarası olan kişilerde kişinin üzerine dokunup numarayı seçtikten sonra Bitti\'ye basın. Veya aşağıdaki kutucuğa adı ve numarayı yazıp 1 saniyede kaydedebilirsiniz.', 'error');
             return;
           }
           await this.processPickedPhoneContacts(selected);
@@ -418,7 +423,7 @@ const App = {
             this.openContactModal();
           }
           if (err && (err.name === 'AbortError' || /cancel/i.test(err.message || ''))) {
-            this.toast('💡 Android rehberinden seçim yapılmadıysa, yukarıdaki kutudan Ad ve Numara ile tek tıkla ekleyebilirsiniz.');
+            this.toast('⚠️ Numara seçilmedi: Cem ORTİ (+2 numara) gibi birden fazla numarası olan kişilerde kişinin üzerine dokunup numarayı seçtikten sonra Bitti\'ye basın. Veya aşağıdaki kutucuğa adı ve numarayı yazıp 1 saniyede kaydedebilirsiniz.', 'error');
             return;
           }
           this.toast('📱 ' + (err && err.message ? err.message : 'Rehber seçici açılamadı. Lütfen numara yazarak ekleyin.'));
