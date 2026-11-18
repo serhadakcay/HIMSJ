@@ -45,8 +45,8 @@ class NexusE2EE {
     const peerPub = await crypto.subtle.importKey('jwk', peerJwk, { name: 'ECDH', namedCurve: 'P-256' }, false, []);
 
     const shared = await crypto.subtle.deriveBits({ name: 'ECDH', public: peerPub }, this.keyPair.privateKey, 256);
-    const chainA = await this._hkdf(shared, 'Nexus-v6-ChainA');
-    const chainB = await this._hkdf(shared, 'Nexus-v6-ChainB');
+    const chainA = await this._hkdf(shared, 'Nexus-v7-ChainA');
+    const chainB = await this._hkdf(shared, 'Nexus-v7-ChainB');
     const isLower = myJwk.x < peerJwk.x;
 
     const state = {
@@ -126,7 +126,6 @@ class NexusE2EE {
     return obj;
   }
 
-  // Signal / WhatsApp Out-of-Band Şifreli Medya/Dosya Motoru
   async encryptFileBlob(arrayBuffer) {
     const rawKey = crypto.getRandomValues(new Uint8Array(32));
     const iv = crypto.getRandomValues(new Uint8Array(12));

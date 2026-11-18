@@ -1,7 +1,7 @@
 {
-  "name": "nexuschat-v6-ultimate",
-  "version": "6.0.0",
-  "description": "WhatsApp, Telegram & Signal seviyesinde uçtan uca şifreli mesajlaşma, gelişmiş rehber yönetimi, dosya/resim/kişi kartı/konum paylaşımı, 24 saatlik durum güncellemeleri, profil fotoğrafı, sohbet duvar kağıdı ve yazı tipi/boyutu özelleştirme",
+  "name": "nexuschat-v7-ultimate",
+  "version": "7.0.0",
+  "description": "Gelen arama cevaplama/reddetme ekranı, 10 çalma (ring) zaman aşımı + cevapsız arama kaydı, çift yönlü görüntülü arama ve kesin çalışan rehber aktarımlı E2EE mesajlaşma",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"

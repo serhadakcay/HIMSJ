@@ -28,7 +28,7 @@ self.addEventListener('push', (event) => {
             { action: 'answer', title: '📞 Cevapla' },
             { action: 'reject', title: '❌ Reddet' }
           ]
-        : [{ action: 'open', title: '💬 Mesajı Aç' }]
+        : [{ action: 'open', title: '💬 Aç' }]
     });
   })());
 });

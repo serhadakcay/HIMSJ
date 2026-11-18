@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="apple-mobile-web-app-title" content="NexusChat" />
-  <title>NexusChat v6 — E2EE Mesajlaşma, Durum, Rehber ve Arama</title>
+  <title>NexusChat v7 — E2EE Mesajlaşma, Durum, Rehber ve Arama</title>
   <link rel="manifest" href="/manifest.json" />
   <link rel="icon" type="image/svg+xml" href="/icon.svg" />
   <link rel="apple-touch-icon" href="/icon.svg" />
@@ -38,11 +38,12 @@
 
     /* Ana Ekran */
     #appScreen { display: flex; flex: 1; height: 100%; overflow: hidden; }
-    .sidebar { width: 350px; background: var(--panel); border-right: 1px solid var(--border); display: flex; flex-direction: column; }
+    .sidebar { width: 360px; background: var(--panel); border-right: 1px solid var(--border); display: flex; flex-direction: column; }
     .top-bar { padding: 10px 12px; background: var(--header); display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); gap: 6px; }
-    .side-tabs { display: grid; grid-template-columns: 1fr 1fr 1fr; background: var(--bg); border-bottom: 1px solid var(--border); }
-    .side-tab { padding: 10px 4px; border: none; border-radius: 0; background: transparent; color: var(--muted); font-size: 13px; font-weight: 700; margin: 0; border-bottom: 2px solid transparent; }
+    .side-tabs { display: grid; grid-template-columns: repeat(4, 1fr); background: var(--bg); border-bottom: 1px solid var(--border); }
+    .side-tab { padding: 10px 2px; border: none; border-radius: 0; background: transparent; color: var(--muted); font-size: 12px; font-weight: 700; margin: 0; border-bottom: 2px solid transparent; position: relative; }
     .side-tab.active { color: var(--accent); border-bottom-color: var(--accent); background: rgba(0,168,132,0.08); }
+    .missed-badge { background: var(--danger); color: #fff; font-size: 10px; padding: 1px 5px; border-radius: 10px; margin-left: 3px; }
     .push-banner { background: rgba(0,168,132,0.16); padding: 8px 12px; font-size: 12px; display: flex; justify-content: space-between; align-items: center; gap: 8px; border-bottom: 1px solid var(--border); }
     .contact-list { flex: 1; overflow-y: auto; }
     .contact-item { padding: 12px 14px; border-bottom: 1px solid var(--border); cursor: pointer; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
@@ -64,13 +65,11 @@
     .msg img { max-width: 240px; border-radius: 8px; display: block; margin-bottom: 5px; cursor: pointer; }
     .msg-meta { font-size: 10px; color: rgba(255,255,255,0.68); text-align: right; margin-top: 4px; }
 
-    /* Rich Attachment Cards (Kişi Kartı, Konum, Dosya) */
     .rich-card { background: rgba(0,0,0,0.25); border-left: 3px solid var(--accent); padding: 9px 11px; border-radius: 8px; margin-bottom: 4px; }
     .rich-card-title { font-weight: 700; font-size: 13.5px; margin-bottom: 3px; }
     .rich-card-sub { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
     .rich-card-btn { display: inline-block; padding: 5px 10px; background: var(--accent); color: #0b141a; border-radius: 6px; font-size: 12px; font-weight: 700; text-decoration: none; border: none; cursor: pointer; width: auto; margin: 0; }
 
-    /* Ekleme Menüsü (Ataç) */
     .attach-menu { position: absolute; bottom: 64px; left: 12px; background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 10px; display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; box-shadow: 0 10px 28px rgba(0,0,0,0.6); z-index: 30; width: 260px; }
     .attach-item { display: flex; align-items: center; gap: 8px; padding: 10px; border-radius: 10px; background: var(--header); color: var(--text); font-size: 13px; font-weight: 600; border: none; margin: 0; cursor: pointer; text-align: left; }
     .attach-item:hover { background: var(--input); }
@@ -80,7 +79,7 @@
     .composer select, .composer button { width: auto; margin: 0; }
 
     /* Modallar */
-    .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,0.75); display: flex; align-items: center; justify-content: center; padding: 14px; z-index: 100; }
+    .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,0.78); display: flex; align-items: center; justify-content: center; padding: 14px; z-index: 100; }
     .modal { width: 100%; max-width: 460px; max-height: 90dvh; overflow-y: auto; background: var(--panel); border-radius: 16px; padding: 20px; border: 1px solid var(--border); }
     .modal h3 { margin-bottom: 12px; color: var(--accent); }
     .card-box { background: var(--header); padding: 13px; border-radius: 12px; margin-bottom: 12px; border: 1px solid var(--border); }
@@ -90,14 +89,16 @@
     .phone-choice-row { display: flex; align-items: center; gap: 10px; padding: 11px; background: var(--input); border: 1px solid var(--border); border-radius: 10px; margin-bottom: 8px; cursor: pointer; }
     .phone-choice-row input { width: 18px; height: 18px; margin: 0; accent-color: var(--accent); }
 
-    /* Tam Ekran Arama */
-    #callScreen { position: fixed; inset: 0; background: #070b0e; z-index: 200; display: flex; flex-direction: column; justify-content: space-between; padding: 24px; text-align: center; }
-    .video-box { flex: 1; position: relative; border-radius: 16px; overflow: hidden; background: #111b21; margin: 16px 0; display: flex; align-items: center; justify-content: center; }
-    #remoteVideo { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; z-index: 1; }
+    /* Tam Ekran Arama (Gelen Arama Cevaplama / Reddetme Butonları Dahil) */
+    #callScreen { position: fixed; inset: 0; background: #070b0e; z-index: 250; display: flex; flex-direction: column; justify-content: space-between; padding: 24px 16px calc(24px + env(safe-area-inset-bottom, 0px)); text-align: center; }
+    .video-box { flex: 1; position: relative; border-radius: 18px; overflow: hidden; background: #111b21; margin: 14px 0; display: flex; align-items: center; justify-content: center; }
+    #remoteVideo { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; z-index: 1; background: #000; }
     #remoteRelayImg { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; z-index: 2; }
-    #localVideo { position: absolute; right: 14px; bottom: 14px; width: 120px; height: 160px; border-radius: 12px; object-fit: cover; border: 2px solid var(--accent); background: #000; z-index: 5; }
-    .call-actions { display: flex; justify-content: center; gap: 12px; flex-wrap: wrap; }
-    .call-btn { width: auto; padding: 13px 20px; border-radius: 30px; font-size: 14.5px; }
+    #localVideo { position: absolute; right: 14px; bottom: 14px; width: 115px; height: 155px; border-radius: 12px; object-fit: cover; border: 2px solid var(--accent); background: #000; z-index: 5; }
+    .call-center-avatar { position: relative; z-index: 3; display: flex; flex-direction: column; align-items: center; gap: 10px; }
+    .call-actions { display: flex; justify-content: center; gap: 14px; flex-wrap: wrap; z-index: 10; }
+    .call-btn { width: auto; padding: 14px 22px; border-radius: 32px; font-size: 15px; font-weight: 700; margin: 0; }
+    .btn-green-pulse { background: #22c55e; color: #052e16; box-shadow: 0 0 0 6px rgba(34, 197, 94, 0.25); font-size: 16px; padding: 16px 28px; }
     .btn-red { background: var(--danger); color: #fff; }
 
     @media (max-width: 740px) {
@@ -111,7 +112,6 @@
 </head>
 <body>
 
-  <!-- Gizli Dosya Seçiciler -->
   <input type="file" id="vcfFileInput" accept=".vcf,.vcard,text/vcard,text/x-vcard,*/*" multiple class="hidden" />
   <input type="file" id="imageFileInput" accept="image/*" class="hidden" />
   <input type="file" id="anyFileInput" class="hidden" />
@@ -122,7 +122,7 @@
 
   <!-- 1. Şifreli Giriş & Kayıt Ekranı -->
   <div id="authScreen">
-    <h1>🔒 NexusChat v6 E2EE</h1>
+    <h1>🔒 NexusChat v7 E2EE</h1>
     <p>Uçtan uca şifreli mesajlaşma, rehber entegrasyonu, durum paylaşımları ve görüntülü arama.</p>
     <div class="tabs">
       <button class="tab active" id="tabLogin">Giriş Yap</button>
@@ -158,15 +158,16 @@
         </div>
         <div style="display:flex;gap:4px;flex-shrink:0;">
           <button class="btn-sm" id="openAddContactBtn" title="Rehbere Kişi Ekle">➕ Kişi</button>
-          <button class="btn-sm btn-sec" id="openAppearanceBtn" title="Yazı Boyutu, Stili ve Arkaplan Fotoğrafı">🎨</button>
+          <button class="btn-sm btn-sec" id="openAppearanceBtn" title="Görünüm & Yazı Ayarları">🎨</button>
           <button class="btn-sm btn-sec" id="openInstallBtn" title="Telefona Kur">📲</button>
         </div>
       </div>
 
       <div class="side-tabs">
-        <button class="side-tab active" id="navChatsTab">💬 Sohbet & Rehber</button>
-        <button class="side-tab" id="navStoriesTab">⭕ Durum (24s)</button>
-        <button class="side-tab" id="navSettingsTab">👤 Profil & Ayar</button>
+        <button class="side-tab active" id="navChatsTab">💬 Sohbet</button>
+        <button class="side-tab" id="navCallsTab">📞 Aramalar<span id="missedBadge" class="missed-badge hidden">0</span></button>
+        <button class="side-tab" id="navStoriesTab">⭕ Durum</button>
+        <button class="side-tab" id="navSettingsTab">👤 Profil</button>
       </div>
 
       <div class="push-banner" id="pushBanner">
@@ -198,7 +199,6 @@
       <div class="e2ee-bar">🛡️ ECDH P-256 + HKDF Ratchet + AES-256-GCM Uçtan Uca Şifreli</div>
       <div class="messages" id="msgFeed"></div>
 
-      <!-- Zengin Paylaşım Menüsü (Resim, Dosya, Kişi Kartı, Konum) -->
       <div class="attach-menu hidden" id="attachMenu">
         <button type="button" class="attach-item" id="sendImageOpt">🖼️ Fotoğraf Gönder</button>
         <button type="button" class="attach-item" id="sendFileOpt">📄 Dosya Gönder</button>
@@ -272,14 +272,14 @@
     </div>
   </div>
 
-  <!-- 6. Durum Güncellemesi (24 Saatlik Story) Paylaşma Modalı -->
+  <!-- 6. Durum Güncellemesi Modalı -->
   <div id="createStoryModal" class="modal-bg hidden">
     <div class="modal">
       <h3>⭕ Durum Güncellemesi Paylaş (24 Saat)</h3>
       <textarea id="storyCaptionInput" rows="3" placeholder="Durumunuza bir yazı ekleyin..."></textarea>
       <div style="display:flex;gap:8px;margin-bottom:10px;">
         <button type="button" class="btn-sec" id="pickStoryImageBtn" style="margin:0;">🖼️ Duruma Fotoğraf Ekle</button>
-        <input type="color" id="storyBgColorInput" value="#0f766e" style="width:60px;padding:4px;margin:0;height:42px;" title="Arka Plan Rengi" />
+        <input type="color" id="storyBgColorInput" value="#0f766e" style="width:60px;padding:4px;margin:0;height:42px;" />
       </div>
       <div id="storyImagePreview" style="font-size:12px;color:var(--accent);margin-bottom:10px;"></div>
       <div style="display:flex;gap:8px;">
@@ -289,11 +289,10 @@
     </div>
   </div>
 
-  <!-- 7. Görünüm: Arkaplan Fotoğrafı, Yazı Karakteri ve Boyutu Modalı -->
+  <!-- 7. Görünüm Modalı -->
   <div id="appearanceModal" class="modal-bg hidden">
     <div class="modal">
       <h3>🎨 Görünüm, Arkaplan Fotoğrafı ve Yazı Ayarları</h3>
-
       <div class="card-box">
         <h4>🖼️ Sohbet Arkaplanı (Duvar Kağıdı)</h4>
         <div style="display:flex;gap:8px;margin-top:8px;">
@@ -301,32 +300,29 @@
           <button type="button" class="btn-sm btn-sec" id="clearWallpaperBtn">🗑️ Kaldır</button>
         </div>
       </div>
-
       <div class="card-box">
         <h4>📏 Yazı Boyutu (<span id="fontSizeValLabel">14.5px</span>)</h4>
         <input type="range" id="fontSizeRange" min="12" max="22" step="0.5" value="14.5" style="margin-top:8px;" />
       </div>
-
       <div class="card-box">
-        <h4>✒️ Yazı Karakteri (Font Ailesi & Kalınlık)</h4>
+        <h4>✒️ Yazı Karakteri</h4>
         <select id="fontFamilySelect" style="margin-top:8px;">
-          <option value='-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif'>Modern Sistem (Varsayılan)</option>
+          <option value='-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif'>Modern Sistem</option>
           <option value='"Trebuchet MS", Verdana, sans-serif'>Yuvarlak & Yumuşak</option>
-          <option value='Georgia, "Times New Roman", serif'>Klasik Kitap (Serif)</option>
-          <option value='Consolas, "Courier New", monospace'>Teknik / Daktilo (Monospace)</option>
+          <option value='Georgia, "Times New Roman", serif'>Klasik Serif</option>
+          <option value='Consolas, "Courier New", monospace'>Teknik Monospace</option>
         </select>
         <select id="fontWeightSelect">
           <option value="400">Normal Kalınlık</option>
-          <option value="600">Orta Kalın (Semi-Bold)</option>
-          <option value="700">Kalın (Bold)</option>
+          <option value="600">Orta Kalın</option>
+          <option value="700">Kalın</option>
         </select>
       </div>
-
       <button type="button" id="closeAppearanceBtn" style="margin-bottom:0;">✅ Kaydet ve Kapat</button>
     </div>
   </div>
 
-  <!-- 8. Android & iOS Kurulum Sihirbazı Modalı -->
+  <!-- 8. Kurulum Sihirbazı Modalı -->
   <div id="installModal" class="modal-bg hidden">
     <div class="modal">
       <h3>📲 Cep Telefonuna (iOS & Android) Kurulum</h3>
@@ -342,7 +338,7 @@
         <h4 style="color:#38bdf8;">🍏 iPhone & iPad (iOS Safari)</h4>
         <ol>
           <li>Bu sayfayı <strong>Safari</strong> tarayıcısında açın.</li>
-          <li>Alt ortadaki <strong>Paylaş (⬆️ Kare içinde yukarı ok)</strong> simgesine dokunun.</li>
+          <li>Alt ortadaki <strong>Paylaş (⬆️)</strong> simgesine dokunun.</li>
           <li><strong>"Ana Ekrana Ekle"</strong> seçeneğine dokunup <strong>Ekle</strong> deyin.</li>
         </ol>
       </div>
@@ -363,30 +359,35 @@
     </div>
   </div>
 
-  <!-- 10. Tam Ekran Sesli / Görüntülü Arama Ekranı -->
+  <!-- 10. Tam Ekran Sesli / Görüntülü Arama Ekranı (Açma Tuşu + 10 Çalma Sayacı + Çift Yönlü Görüntü) -->
   <div id="callScreen" class="hidden">
     <div>
       <span style="background:rgba(0,168,132,0.2);color:var(--accent);padding:4px 12px;border-radius:16px;font-size:12px;">🔒 Uçtan Uca Şifreli Canlı Arama</span>
       <h2 id="callPeerTitle" style="margin-top:12px;">Aranıyor...</h2>
-      <p id="callStatusText" style="color:var(--muted);font-size:14px;margin-top:4px;">Çalıyor...</p>
+      <p id="callStatusText" style="color:var(--muted);font-size:14px;margin-top:4px;">Çalıyor (1 / 10)...</p>
     </div>
 
     <div class="video-box">
       <video id="remoteVideo" autoplay playsinline></video>
       <img id="remoteRelayImg" class="hidden" alt="Canlı Görüntü" />
+      <div id="callCenterAvatar" class="call-center-avatar">
+        <div class="avatar" style="width:92px;height:92px;font-size:36px;" id="callPeerBigAvatar">K</div>
+      </div>
       <video id="localVideo" autoplay playsinline muted></video>
     </div>
 
+    <!-- GELEN ARAMA AÇMA VE REDDETME BUTONLARI -->
     <div class="call-actions hidden" id="incomingCallControls">
-      <button class="call-btn" id="acceptCallBtn">📞 Cevapla</button>
-      <button class="call-btn btn-red" id="rejectCallBtn">❌ Reddet</button>
+      <button type="button" class="call-btn btn-green-pulse" id="acceptCallBtn">📞 Aç (Cevapla)</button>
+      <button type="button" class="call-btn btn-red" id="rejectCallBtn">❌ Reddet</button>
     </div>
 
-    <div class="call-actions" id="activeCallControls">
-      <button class="call-btn btn-sec" id="toggleSpeakerBtn">🔈 Hoparlör</button>
-      <button class="call-btn btn-sec" id="toggleMicBtn">🎤 Mikrofon</button>
-      <button class="call-btn btn-sec" id="toggleCamBtn">📷 Kamera</button>
-      <button class="call-btn btn-red" id="hangupCallBtn">📞 Kapat</button>
+    <!-- AKTİF ARAMA KONTROLLERİ -->
+    <div class="call-actions hidden" id="activeCallControls">
+      <button type="button" class="call-btn btn-sec" id="toggleSpeakerBtn">🔈 Hoparlör</button>
+      <button type="button" class="call-btn btn-sec" id="toggleMicBtn">🎤 Mikrofon</button>
+      <button type="button" class="call-btn btn-sec" id="toggleCamBtn">📷 Kamera</button>
+      <button type="button" class="call-btn btn-red" id="hangupCallBtn">📞 Kapat</button>
     </div>
   </div>
 

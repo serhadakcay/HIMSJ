@@ -8,13 +8,15 @@ let ws = null;
 let contacts = [];
 let discoverableUsers = [];
 let stories = [];
+let callLogs = [];
+let missedCallCount = 0;
 let currentSideTab = 'chats';
 let activePeer = null;
 let deferredInstallPrompt = null;
 let pendingPhoneChoiceCb = null;
 let pendingStoryImageDataUrl = '';
 
-// WebRTC + CGNAT Medya Rölesi
+// WebRTC + CGNAT Medya Rölesi + 10 Çalma (Ring) Kontrolü
 let pc = null;
 let localStream = null;
 let remoteStream = null;
@@ -22,12 +24,16 @@ let activeCall = null;
 let incomingOffer = null;
 let pendingCandidates = [];
 let ringInterval = null;
+let ringCount = 0;
+const MAX_RINGS = 10;
+
 let isSpeakerOn = false;
 let callAudioCtx = null;
 let speakerGain = null;
 let nextPlayTime = 0;
 let wsAudioProc = null;
 let wsVideoTimer = null;
+let captureVideoEl = null;
 let webrtcAudioActive = false;
 let webrtcVideoActive = false;
 let statsInterval = null;
@@ -68,19 +74,9 @@ applySavedAppearance();
 
 document.getElementById('openAppearanceBtn').onclick = () => document.getElementById('appearanceModal').classList.remove('hidden');
 document.getElementById('closeAppearanceBtn').onclick = () => document.getElementById('appearanceModal').classList.add('hidden');
-
-document.getElementById('fontSizeRange').oninput = (e) => {
-  localStorage.setItem('nexus_font_size', e.target.value);
-  applySavedAppearance();
-};
-document.getElementById('fontFamilySelect').onchange = (e) => {
-  localStorage.setItem('nexus_font_family', e.target.value);
-  applySavedAppearance();
-};
-document.getElementById('fontWeightSelect').onchange = (e) => {
-  localStorage.setItem('nexus_font_weight', e.target.value);
-  applySavedAppearance();
-};
+document.getElementById('fontSizeRange').oninput = (e) => { localStorage.setItem('nexus_font_size', e.target.value); applySavedAppearance(); };
+document.getElementById('fontFamilySelect').onchange = (e) => { localStorage.setItem('nexus_font_family', e.target.value); applySavedAppearance(); };
+document.getElementById('fontWeightSelect').onchange = (e) => { localStorage.setItem('nexus_font_weight', e.target.value); applySavedAppearance(); };
 
 document.getElementById('pickWallpaperBtn').onclick = () => document.getElementById('wallpaperFileInput').click();
 document.getElementById('wallpaperFileInput').onchange = (e) => {
@@ -88,18 +84,11 @@ document.getElementById('wallpaperFileInput').onchange = (e) => {
   if (!file) return;
   e.target.value = '';
   compressImageToDataUrl(file, 1280, 0.82, (dataUrl) => {
-    try {
-      localStorage.setItem('nexus_chat_wallpaper', dataUrl);
-      applySavedAppearance();
-    } catch {
-      alert('Fotoğraf boyutu çok yüksek, daha küçük bir görsel seçin.');
-    }
+    try { localStorage.setItem('nexus_chat_wallpaper', dataUrl); applySavedAppearance(); }
+    catch { alert('Fotoğraf boyutu çok yüksek.'); }
   });
 };
-document.getElementById('clearWallpaperBtn').onclick = () => {
-  localStorage.removeItem('nexus_chat_wallpaper');
-  applySavedAppearance();
-};
+document.getElementById('clearWallpaperBtn').onclick = () => { localStorage.removeItem('nexus_chat_wallpaper'); applySavedAppearance(); };
 
 function compressImageToDataUrl(file, maxDim, quality, cb) {
   const reader = new FileReader();
@@ -112,8 +101,7 @@ function compressImageToDataUrl(file, maxDim, quality, cb) {
         if (w > h) { h = Math.round((h * maxDim) / w); w = maxDim; }
         else { w = Math.round((w * maxDim) / h); h = maxDim; }
       }
-      canvas.width = w;
-      canvas.height = h;
+      canvas.width = w; canvas.height = h;
       canvas.getContext('2d').drawImage(img, 0, 0, w, h);
       cb(canvas.toDataURL('image/jpeg', quality));
     };
@@ -122,12 +110,8 @@ function compressImageToDataUrl(file, maxDim, quality, cb) {
   reader.readAsDataURL(file);
 }
 
-// --- KURULUM (ANDROID & iOS) ---
-window.addEventListener('beforeinstallprompt', (e) => {
-  e.preventDefault();
-  deferredInstallPrompt = e;
-});
-
+// --- KURULUM ---
+window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); deferredInstallPrompt = e; });
 document.getElementById('openInstallBtn').onclick = () => document.getElementById('installModal').classList.remove('hidden');
 document.getElementById('openInstallFromAuthBtn').onclick = () => document.getElementById('installModal').classList.remove('hidden');
 document.getElementById('closeInstallModalBtn').onclick = () => document.getElementById('installModal').classList.add('hidden');
@@ -189,7 +173,6 @@ document.getElementById('tabLogin').onclick = () => {
   document.getElementById('loginForm').classList.remove('hidden');
   document.getElementById('regForm').classList.add('hidden');
 };
-
 document.getElementById('tabReg').onclick = () => {
   document.getElementById('tabReg').classList.add('active');
   document.getElementById('tabLogin').classList.remove('active');
@@ -205,17 +188,12 @@ document.getElementById('regForm').onsubmit = async (e) => {
     const password = document.getElementById('regPass').value;
     const norm = phone.replace(/\D/g, '');
     const pubJwkStr = await e2ee.initForUser(norm);
-
-    const data = await api('/api/auth/register', 'POST', {
-      displayName, phone, password, publicKeyJwk: pubJwkStr, deviceType
-    });
+    const data = await api('/api/auth/register', 'POST', { displayName, phone, password, publicKeyJwk: pubJwkStr, deviceType });
     token = data.token;
     localStorage.setItem('nexus_token', token);
     me = data.user;
     startApp();
-  } catch (err) {
-    alert(err.message);
-  }
+  } catch (err) { alert(err.message); }
 };
 
 document.getElementById('loginForm').onsubmit = async (e) => {
@@ -225,17 +203,12 @@ document.getElementById('loginForm').onsubmit = async (e) => {
     const password = document.getElementById('loginPass').value;
     const norm = phone.replace(/\D/g, '');
     const pubJwkStr = await e2ee.initForUser(norm);
-
-    const data = await api('/api/auth/login', 'POST', {
-      phone, password, publicKeyJwk: pubJwkStr, deviceType
-    });
+    const data = await api('/api/auth/login', 'POST', { phone, password, publicKeyJwk: pubJwkStr, deviceType });
     token = data.token;
     localStorage.setItem('nexus_token', token);
     me = data.user;
     startApp();
-  } catch (err) {
-    alert(err.message);
-  }
+  } catch (err) { alert(err.message); }
 };
 
 (async () => {
@@ -245,17 +218,14 @@ document.getElementById('loginForm').onsubmit = async (e) => {
     me = data.user;
     await e2ee.initForUser(me.phone_normalized.replace(/\D/g, ''));
     startApp();
-  } catch {
-    localStorage.removeItem('nexus_token');
-  }
+  } catch { localStorage.removeItem('nexus_token'); }
 })();
 
 function updateMyAvatarUi() {
   const box = document.getElementById('myAvatarBox');
   if (!box || !me) return;
-  if (me.avatar_url) {
-    box.innerHTML = `<img src="${me.avatar_url}" alt="Profil" />`;
-  } else {
+  if (me.avatar_url) box.innerHTML = `<img src="${me.avatar_url}" alt="Profil" />`;
+  else {
     box.textContent = (me.display_name || 'B')[0].toUpperCase();
     box.style.background = me.avatar_color || '#00a884';
   }
@@ -275,12 +245,12 @@ async function startApp() {
 
   connectWebSocket();
   await flushPendingContactImport();
-  await Promise.all([loadContacts(), loadStories()]);
+  await Promise.all([loadContacts(), loadStories(), loadCallLogs()]);
   renderSidebar();
 }
 
-// Sol Panel Sekmeleri (Sohbet & Rehber / Durum / Profil)
 document.getElementById('navChatsTab').onclick = () => switchSideTab('chats');
+document.getElementById('navCallsTab').onclick = () => switchSideTab('calls');
 document.getElementById('navStoriesTab').onclick = () => switchSideTab('stories');
 document.getElementById('navSettingsTab').onclick = () => switchSideTab('settings');
 document.getElementById('openProfileBtn').onclick = () => switchSideTab('settings');
@@ -288,11 +258,32 @@ document.getElementById('openProfileBtn').onclick = () => switchSideTab('setting
 function switchSideTab(tab) {
   currentSideTab = tab;
   document.getElementById('navChatsTab').classList.toggle('active', tab === 'chats');
+  document.getElementById('navCallsTab').classList.toggle('active', tab === 'calls');
   document.getElementById('navStoriesTab').classList.toggle('active', tab === 'stories');
   document.getElementById('navSettingsTab').classList.toggle('active', tab === 'settings');
-  if (tab === 'stories') loadStories().then(renderSidebar);
-  else if (tab === 'chats') loadContacts().then(renderSidebar);
-  else renderSidebar();
+
+  if (tab === 'calls') {
+    missedCallCount = 0;
+    updateMissedBadge();
+    loadCallLogs().then(renderSidebar);
+  } else if (tab === 'stories') {
+    loadStories().then(renderSidebar);
+  } else if (tab === 'chats') {
+    loadContacts().then(renderSidebar);
+  } else {
+    renderSidebar();
+  }
+}
+
+function updateMissedBadge() {
+  const b = document.getElementById('missedBadge');
+  if (!b) return;
+  if (missedCallCount > 0) {
+    b.textContent = String(missedCallCount);
+    b.classList.remove('hidden');
+  } else {
+    b.classList.add('hidden');
+  }
 }
 
 document.getElementById('enablePushBtn').onclick = async () => {
@@ -320,10 +311,7 @@ async function registerWebPush() {
     const { publicKey } = await api('/api/push/vapid-key');
     let sub = await reg.pushManager.getSubscription();
     if (!sub) {
-      sub = await reg.pushManager.subscribe({
-        userVisibleOnly: true,
-        applicationServerKey: urlB64ToUint8Array(publicKey)
-      });
+      sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlB64ToUint8Array(publicKey) });
     }
     await api('/api/push/subscribe', 'POST', { subscription: sub.toJSON(), deviceType });
   } catch {}
@@ -368,7 +356,8 @@ function connectWebSocket() {
       showIncomingCallScreen(data);
     } else if (data.type === 'CALL_ANSWER') {
       stopRingtone();
-      document.getElementById('callStatusText').textContent = '🟢 Görüşme Bağlandı';
+      if (activeCall) activeCall.answered = true;
+      document.getElementById('callStatusText').textContent = '🟢 Görüşme Aktif';
       if (pc && data.sdp) {
         await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
         for (const cand of pendingCandidates) await pc.addIceCandidate(new RTCIceCandidate(cand)).catch(() => {});
@@ -383,29 +372,42 @@ function connectWebSocket() {
       }
     } else if (data.type === 'CALL_MEDIA') {
       handleIncomingWsMedia(data);
-    } else if (data.type === 'CALL_REJECT' || data.type === 'CALL_END') {
+    } else if (data.type === 'CALL_MISSED') {
+      // Karşı taraf 10 kez çaldırıp kapattı -> Alıcı ekranında Cevapsız Arama olarak düşsün
+      closeCallScreen();
+      missedCallCount++;
+      updateMissedBadge();
+      await loadCallLogs();
+      if (currentSideTab === 'calls') renderSidebar();
+      alert(`📵 Cevapsız Arama: ${data.fromDisplayName || 'Biri'} sizi aradı.`);
+    } else if (data.type === 'CALL_REJECT') {
+      closeCallScreen();
+      alert('❌ Aradığınız kişi aramayı reddetti.');
+    } else if (data.type === 'CALL_END') {
       closeCallScreen();
     }
   };
 }
 
-// --- REHBER VE DURUM / PROFİL GÖRÜNÜMÜ ---
+// --- VERİ YÜKLEME VE SOL PANEL ---
 async function loadContacts() {
   const data = await api('/api/contacts');
   contacts = data.contacts || [];
   discoverableUsers = data.discoverable || [];
 }
-
 async function loadStories() {
   const data = await api('/api/stories');
   stories = data.stories || [];
+}
+async function loadCallLogs() {
+  const data = await api('/api/calls');
+  callLogs = data.calls || [];
 }
 
 function renderSidebar() {
   const listEl = document.getElementById('sidebarContent');
   listEl.innerHTML = '';
 
-  // 1. SOHBETLER & REHBER
   if (currentSideTab === 'chats') {
     if (contacts.length === 0 && discoverableUsers.length === 0) {
       listEl.innerHTML = '<div style="padding:24px;text-align:center;color:var(--muted);font-size:13px;">Henüz kişi yok. Sağ üstten <b>➕ Kişi</b> butonuna basarak rehberden veya numaradan kişi ekleyin.</div>';
@@ -430,7 +432,6 @@ function renderSidebar() {
       listEl.appendChild(div);
     }
 
-    // Sistemde kayıtlı olup henüz rehbere eklenmemiş kullanıcıları tek dokunuşla rehbere ekleme bölümü
     if (discoverableUsers.length > 0) {
       const hdr = document.createElement('div');
       hdr.style.cssText = 'padding:10px 14px;font-size:12px;font-weight:700;color:var(--accent);background:var(--bg);border-bottom:1px solid var(--border);';
@@ -461,7 +462,38 @@ function renderSidebar() {
     return;
   }
 
-  // 2. DURUM GÜNCELLEMELERİ (24 SAATLİK STORIES)
+  // ARAMALAR VE CEVAPSIZ ARAMA GEÇMİŞİ
+  if (currentSideTab === 'calls') {
+    if (callLogs.length === 0) {
+      listEl.innerHTML = '<div style="padding:24px;text-align:center;color:var(--muted);font-size:13px;">Henüz arama geçmişi bulunmuyor.</div>';
+      return;
+    }
+    for (const cl of callLogs) {
+      const isOutgoing = cl.caller_id === me.id;
+      const otherName = isOutgoing ? cl.callee_name : cl.caller_name;
+      const otherPhone = isOutgoing ? cl.callee_phone : cl.caller_phone;
+      const timeStr = new Date(cl.created_at + 'Z').toLocaleString([], { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' });
+      const statusHtml = cl.status === 'missed'
+        ? `<span style="color:#ef4444;font-weight:700;">📵 ${isOutgoing ? 'Cevap Verilmedi' : 'Cevapsız Arama'}</span>`
+        : cl.status === 'rejected'
+        ? `<span style="color:#f59e0b;">❌ Reddedildi</span>`
+        : `<span style="color:#22c55e;">✅ ${isOutgoing ? 'Giden' : 'Gelen'} (${cl.duration_sec} sn)</span>`;
+
+      const div = document.createElement('div');
+      div.className = 'contact-item';
+      div.innerHTML = `
+        <div>
+          <div style="font-weight:700;">${cl.call_type === 'video' ? '📹' : '📞'} ${escapeHtml(otherName)}</div>
+          <div style="font-size:12px;margin-top:2px;">${statusHtml} • ${timeStr}</div>
+        </div>
+        <div style="font-size:12px;color:var(--muted);">${escapeHtml(otherPhone)}</div>
+      `;
+      listEl.appendChild(div);
+    }
+    return;
+  }
+
+  // DURUM GÜNCELLEMELERİ
   if (currentSideTab === 'stories') {
     const addBox = document.createElement('div');
     addBox.style.padding = '12px 14px';
@@ -503,7 +535,7 @@ function renderSidebar() {
     return;
   }
 
-  // 3. PROFİL FOTOĞRAFI, HAKKIMDA VE AYARLAR
+  // PROFİL & AYARLAR
   if (currentSideTab === 'settings') {
     const bigAvatar = me.avatar_url
       ? `<img src="${me.avatar_url}" style="width:100%;height:100%;object-fit:cover;" />`
@@ -515,19 +547,16 @@ function renderSidebar() {
           <div class="avatar" style="width:84px;height:84px;font-size:32px;margin:0 auto 10px;background:${me.avatar_color};">${bigAvatar}</div>
           <button type="button" class="btn-sm" id="changeAvatarBtn">📷 Profil Fotoğrafı Seç / Değiştir</button>
         </div>
-
         <div class="card-box">
           <h4>👤 Profil Bilgilerim</h4>
           <input type="text" id="profNameInput" value="${escapeHtml(me.display_name)}" placeholder="Ad Soyad" style="margin-top:8px;" />
           <input type="text" id="profBioInput" value="${escapeHtml(me.bio || '')}" placeholder="Durum / Hakkımda" />
           <button type="button" id="saveProfileBtn" style="margin-bottom:0;">💾 Profili Kaydet</button>
         </div>
-
         <div class="card-box">
           <h4>🎨 Görünüm & Yazı Ayarları</h4>
           <button type="button" class="btn-sec" id="openAppFromSettingsBtn" style="margin-top:6px;margin-bottom:0;">🖼️ Arkaplan Fotoğrafı & Yazı Tipi/Boyutu</button>
         </div>
-
         <button type="button" class="btn-red" id="settingsLogoutBtn">🚪 Oturumu Kapat</button>
       </div>
     `;
@@ -559,11 +588,9 @@ document.getElementById('avatarFileInput').onchange = (e) => {
     me = res.user;
     updateMyAvatarUi();
     renderSidebar();
-    alert('✅ Profil fotoğrafınız güncellendi!');
   });
 };
 
-// Durum Paylaşımı Fotoğraf Seçimi
 document.getElementById('pickStoryImageBtn').onclick = () => document.getElementById('storyImageInput').click();
 document.getElementById('storyImageInput').onchange = (e) => {
   const file = e.target.files[0];
@@ -585,23 +612,29 @@ document.getElementById('publishStoryBtn').onclick = async () => {
   renderSidebar();
 };
 
-// --- REHBER EKLEME İŞLEMLERİ ---
+// --- REHBER EKLEME (ANDROID + iOS + VCF + MANUEL) ---
 document.getElementById('openAddContactBtn').onclick = () => document.getElementById('addContactModal').classList.remove('hidden');
 document.getElementById('closeAddModalBtn').onclick = () => document.getElementById('addContactModal').classList.add('hidden');
 
-function cleanStringArray(val) {
+function extractAllStringsDeep(val) {
   if (!val) return [];
-  const arr = Array.isArray(val) ? val : Array.from(val);
-  return arr.map((item) => {
-    if (item && typeof item === 'object') return String(item.value || item.number || item.tel || item.display || item.name || '').trim();
-    return String(item || '').replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, '').trim();
-  }).filter(Boolean);
+  if (typeof val === 'string') return [val.replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, '').trim()].filter(Boolean);
+  if (Array.isArray(val) || (typeof val === 'object' && typeof val.length === 'number')) {
+    const out = [];
+    for (let i = 0; i < val.length; i++) out.push(...extractAllStringsDeep(val[i]));
+    return out;
+  }
+  if (typeof val === 'object') {
+    const candidate = val.value || val.number || val.tel || val.phone || val.display || val.formatted || val.name || '';
+    return candidate ? [String(candidate).trim()] : [];
+  }
+  return [String(val).trim()].filter(Boolean);
 }
 
 function showChoosePhoneModal(contactName, phoneNumbers, callback) {
   pendingPhoneChoiceCb = callback;
   document.getElementById('choosePhoneTitle').textContent = `📱 ${contactName} — Numara Seçin`;
-  document.getElementById('choosePhoneDesc').textContent = `"${contactName}" kişisinde ${phoneNumbers.length} numara bulundu:`;
+  document.getElementById('choosePhoneDesc').textContent = `"${contactName}" kişisinde ${phoneNumbers.length} farklı numara bulundu:`;
 
   const listEl = document.getElementById('choosePhoneList');
   listEl.innerHTML = phoneNumbers.map((p, i) => `
@@ -634,6 +667,7 @@ document.getElementById('confirmChoosePhoneBtn').onclick = async () => {
   }
 };
 
+// Android Contact Picker (Sekme uykudan uyanana kadar bekleyip kesin kaydeder)
 document.getElementById('pickFromPhoneBtn').onclick = () => {
   if (!window.isSecureContext) return alert('Telefon rehberine erişmek için sayfanın HTTPS adresinden açılması gerekir.');
   if (navigator.contacts && typeof navigator.contacts.select === 'function') {
@@ -641,20 +675,27 @@ document.getElementById('pickFromPhoneBtn').onclick = () => {
       .then(async (picked) => {
         if (!picked || picked.length === 0) return;
         const person = picked[0];
-        const contactName = cleanStringArray(person.name)[0] || 'Rehber Kişisi';
-        const rawTels = cleanStringArray(person.tel);
+        const contactName = extractAllStringsDeep(person.name)[0] || 'Rehber Kişisi';
+        const rawTels = extractAllStringsDeep(person.tel);
+
         const uniqueTels = [];
         const seen = new Set();
         for (const t of rawTels) {
           const digits = t.replace(/\D/g, '').slice(-10);
-          if (digits && !seen.has(digits)) { seen.add(digits); uniqueTels.push(t); }
+          if (digits.length >= 7 && !seen.has(digits)) {
+            seen.add(digits);
+            uniqueTels.push(t);
+          }
         }
+
         document.getElementById('addContactModal').classList.add('hidden');
+
         if (uniqueTels.length === 0) {
           document.getElementById('newContactName').value = contactName;
           document.getElementById('addContactModal').classList.remove('hidden');
-          return alert(`"${contactName}" kişisinde numara bulunamadı. Lütfen yazın.`);
+          return alert(`"${contactName}" kişisinde kayıtlı telefon numarası bulunamadı. Lütfen numarasını elle girin.`);
         }
+
         if (uniqueTels.length > 1) {
           showChoosePhoneModal(contactName, uniqueTels, async (chosen) => {
             const listToSave = chosen === '__ALL__'
@@ -667,7 +708,9 @@ document.getElementById('pickFromPhoneBtn').onclick = () => {
         }
       })
       .catch((err) => {
-        if (err && err.name !== 'AbortError') alert('Rehber açılamadı: ' + err.message);
+        if (err && err.name !== 'AbortError') {
+          alert('Rehber açılamadı: ' + err.message);
+        }
       });
   } else {
     alert('Bu cihaz doğrudan rehber penceresini desteklemiyor. "iPhone / .vcf Dosyası" veya numara kutusunu kullanın.');
@@ -711,9 +754,22 @@ async function flushPendingContactImport() {
   let payload;
   try { payload = JSON.parse(raw); } catch { localStorage.removeItem('nexus_pending_contact_import'); return; }
 
-  for (let attempt = 1; attempt <= 3; attempt++) {
+  // Android sistem rehberi kapandıktan sonra Chrome sekmesinin tam uyanmasını bekle
+  if (document.hidden) {
+    await new Promise((resolve) => {
+      const onVis = () => {
+        if (!document.hidden) {
+          document.removeEventListener('visibilitychange', onVis);
+          resolve();
+        }
+      };
+      document.addEventListener('visibilitychange', onVis);
+    });
+  }
+
+  for (let attempt = 1; attempt <= 4; attempt++) {
     try {
-      await new Promise((r) => setTimeout(r, 300 * attempt));
+      await new Promise((r) => setTimeout(r, 400 * attempt));
       const res = await api('/api/contacts/add', 'POST', payload);
       localStorage.removeItem('nexus_pending_contact_import');
       document.getElementById('addContactModal').classList.add('hidden');
@@ -728,7 +784,7 @@ async function flushPendingContactImport() {
       }
       return;
     } catch (err) {
-      if (attempt === 3) {
+      if (attempt === 4) {
         localStorage.removeItem('nexus_pending_contact_import');
         alert('Kişi eklenemedi: ' + err.message);
       }
@@ -744,7 +800,7 @@ function showInviteModal(contact) {
 }
 document.getElementById('closeInviteModalBtn').onclick = () => document.getElementById('inviteModal').classList.add('hidden');
 
-// --- SOHBET, ZENGİN PAYLAŞIM (RESİM, DOSYA, KİŞİ, KONUM) ---
+// --- SOHBET VE MESAJLAŞMA ---
 async function openChat(peer) {
   activePeer = peer;
   document.getElementById('appScreen').classList.add('mobile-chat');
@@ -767,9 +823,8 @@ async function openChat(peer) {
 function updateChatHeader() {
   if (!activePeer) return;
   const pAv = document.getElementById('peerAvatarBox');
-  if (activePeer.avatarUrl) {
-    pAv.innerHTML = `<img src="${activePeer.avatarUrl}" />`;
-  } else {
+  if (activePeer.avatarUrl) pAv.innerHTML = `<img src="${activePeer.avatarUrl}" />`;
+  else {
     pAv.textContent = (activePeer.display_name || 'K')[0].toUpperCase();
     pAv.style.background = activePeer.avatarColor || '#00a884';
   }
@@ -784,16 +839,8 @@ function updateChatHeader() {
 
 document.getElementById('backBtn').onclick = () => document.getElementById('appScreen').classList.remove('mobile-chat');
 
-// Ataç Menüsü Aç/Kapat
-document.getElementById('attachBtn').onclick = () => {
-  document.getElementById('attachMenu').classList.toggle('hidden');
-};
-
-// 1. Fotoğraf Paylaşımı (E2EE Şifreli Blob)
-document.getElementById('sendImageOpt').onclick = () => {
-  document.getElementById('attachMenu').classList.add('hidden');
-  document.getElementById('imageFileInput').click();
-};
+document.getElementById('attachBtn').onclick = () => document.getElementById('attachMenu').classList.toggle('hidden');
+document.getElementById('sendImageOpt').onclick = () => { document.getElementById('attachMenu').classList.add('hidden'); document.getElementById('imageFileInput').click(); };
 document.getElementById('imageFileInput').onchange = async (e) => {
   const file = e.target.files[0];
   if (!file || !activePeer) return;
@@ -801,11 +848,7 @@ document.getElementById('imageFileInput').onchange = async (e) => {
   await uploadAndSendEncryptedMedia(file, 'image');
 };
 
-// 2. Dosya Paylaşımı (PDF, ZIP, Belge vb. — E2EE Şifreli Blob)
-document.getElementById('sendFileOpt').onclick = () => {
-  document.getElementById('attachMenu').classList.add('hidden');
-  document.getElementById('anyFileInput').click();
-};
+document.getElementById('sendFileOpt').onclick = () => { document.getElementById('attachMenu').classList.add('hidden'); document.getElementById('anyFileInput').click(); };
 document.getElementById('anyFileInput').onchange = async (e) => {
   const file = e.target.files[0];
   if (!file || !activePeer) return;
@@ -819,7 +862,7 @@ async function uploadAndSendEncryptedMedia(file, kind) {
   const encBlob = await e2ee.encryptFileBlob(buf);
   const up = await api('/api/blobs', 'POST', { encryptedBase64: encBlob.encryptedBase64 });
 
-  const payload = {
+  await sendEncryptedEnvelope(kind, {
     kind,
     fileName: file.name,
     mimeType: file.type || 'application/octet-stream',
@@ -828,11 +871,9 @@ async function uploadAndSendEncryptedMedia(file, kind) {
     mediaKeyB64: encBlob.mediaKeyB64,
     mediaIvB64: encBlob.mediaIvB64,
     sha256B64: encBlob.sha256B64
-  };
-  await sendEncryptedEnvelope(kind, payload, 0);
+  }, 0);
 }
 
-// 3. Kişi Kartı (vCard) Paylaşımı
 document.getElementById('sendContactCardOpt').onclick = () => {
   document.getElementById('attachMenu').classList.add('hidden');
   const box = document.getElementById('shareContactList');
@@ -840,10 +881,7 @@ document.getElementById('sendContactCardOpt').onclick = () => {
 
   box.innerHTML = contacts.map((c) => `
     <div class="phone-choice-row" data-cid="${c.id}">
-      <div>
-        <strong>👤 ${escapeHtml(c.display_name)}</strong>
-        <div style="font-size:12px;color:var(--muted);">${escapeHtml(c.phone)}</div>
-      </div>
+      <div><strong>👤 ${escapeHtml(c.display_name)}</strong><div style="font-size:12px;color:var(--muted);">${escapeHtml(c.phone)}</div></div>
     </div>
   `).join('');
 
@@ -851,34 +889,21 @@ document.getElementById('sendContactCardOpt').onclick = () => {
     row.onclick = async () => {
       const c = contacts.find((x) => x.id === row.dataset.cid);
       document.getElementById('shareContactModal').classList.add('hidden');
-      if (c) {
-        await sendEncryptedEnvelope('contact', {
-          kind: 'contact',
-          contactName: c.display_name,
-          contactPhone: c.phone
-        }, 0);
-      }
+      if (c) await sendEncryptedEnvelope('contact', { kind: 'contact', contactName: c.display_name, contactPhone: c.phone }, 0);
     };
   });
   document.getElementById('shareContactModal').classList.remove('hidden');
 };
 document.getElementById('closeShareContactBtn').onclick = () => document.getElementById('shareContactModal').classList.add('hidden');
 
-// 4. Konum Paylaşımı (GPS / Harita Bağlantısı)
 document.getElementById('sendLocationOpt').onclick = () => {
   document.getElementById('attachMenu').classList.add('hidden');
   if (!navigator.geolocation) return alert('Cihazınız konum servisini desteklemiyor.');
-
   navigator.geolocation.getCurrentPosition(
     async (pos) => {
       const lat = pos.coords.latitude.toFixed(6);
       const lng = pos.coords.longitude.toFixed(6);
-      await sendEncryptedEnvelope('location', {
-        kind: 'location',
-        lat,
-        lng,
-        mapUrl: `https://maps.google.com/?q=${lat},${lng}`
-      }, 0);
+      await sendEncryptedEnvelope('location', { kind: 'location', lat, lng, mapUrl: `https://maps.google.com/?q=${lat},${lng}` }, 0);
     },
     (err) => alert('Konum alınamadı: ' + err.message),
     { enableHighAccuracy: true, timeout: 10000 }
@@ -889,11 +914,7 @@ async function sendEncryptedEnvelope(msgType, payloadObj, ttlMs) {
   if (!activePeer || !activePeer.publicKeyJwk) return;
   const enc = await e2ee.encryptMessage(activePeer.id, activePeer.publicKeyJwk, payloadObj);
   const res = await api(`/api/messages/${activePeer.id}`, 'POST', {
-    msgType,
-    ciphertext: enc.ciphertext,
-    iv: enc.iv,
-    msgNum: enc.msgNum,
-    ttlMs
+    msgType, ciphertext: enc.ciphertext, iv: enc.iv, msgNum: enc.msgNum, ttlMs
   });
   e2ee.plainCache.set(res.message.id, payloadObj);
   await loadMessages(activePeer.id);
@@ -907,9 +928,7 @@ async function loadMessages(peerId) {
   for (const row of data.messages || []) {
     const isMine = row.sender_id === me.id;
     let plain = { kind: 'text', text: '🔒 [Şifreli Mesaj]' };
-    try {
-      plain = await e2ee.decryptMessage(peerId, activePeer.publicKeyJwk, row);
-    } catch {}
+    try { plain = await e2ee.decryptMessage(peerId, activePeer.publicKeyJwk, row); } catch {}
 
     const div = document.createElement('div');
     div.className = 'msg ' + (isMine ? 'out' : 'in');
@@ -971,10 +990,7 @@ const blobObjectUrlCache = new Map();
 async function decryptAndRenderBlobImage(imgElementId, meta) {
   const el = document.getElementById(imgElementId);
   if (!el) return;
-  if (blobObjectUrlCache.has(meta.blobUrl)) {
-    el.src = blobObjectUrlCache.get(meta.blobUrl);
-    return;
-  }
+  if (blobObjectUrlCache.has(meta.blobUrl)) { el.src = blobObjectUrlCache.get(meta.blobUrl); return; }
   try {
     const resp = await fetch(meta.blobUrl);
     const encBuf = await resp.arrayBuffer();
@@ -993,19 +1009,12 @@ async function downloadDecryptedBlobFile(meta) {
     const plainBuf = await e2ee.decryptFileBlob(encBuf, meta.mediaKeyB64, meta.mediaIvB64, meta.sha256B64);
     const url = URL.createObjectURL(new Blob([plainBuf], { type: meta.mimeType || 'application/octet-stream' }));
     const a = document.createElement('a');
-    a.href = url;
-    a.download = meta.fileName || 'dosya';
-    a.click();
-  } catch (err) {
-    alert('Dosya çözülemedi: ' + err.message);
-  }
+    a.href = url; a.download = meta.fileName || 'dosya'; a.click();
+  } catch (err) { alert('Dosya çözülemedi: ' + err.message); }
 }
 
 document.getElementById('sendBtn').onclick = sendTextMessage;
-document.getElementById('msgInput').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') sendTextMessage();
-});
-
+document.getElementById('msgInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') sendTextMessage(); });
 async function sendTextMessage() {
   const input = document.getElementById('msgInput');
   const text = input.value.trim();
@@ -1015,7 +1024,7 @@ async function sendTextMessage() {
   await sendEncryptedEnvelope('text', { kind: 'text', text }, ttlMs);
 }
 
-// --- SESLİ VE GÖRÜNTÜLÜ ARAMA (WebRTC + TURN + CGNAT Röle) ---
+// --- SESLİ & GÖRÜNTÜLÜ ARAMA + 10 ÇALMA (RING) ZAMAN AŞIMI ---
 function ensureAudioEngine() {
   if (!callAudioCtx || callAudioCtx.state === 'closed') {
     const Ctx = window.AudioContext || window.webkitAudioContext;
@@ -1038,24 +1047,65 @@ document.getElementById('toggleSpeakerBtn').onclick = () => {
   btn.style.background = isSpeakerOn ? '#10b981' : '';
 };
 
-function startRingtone() {
+function startRingCycle(mode = 'outgoing') {
   stopRingtone();
-  const beep = () => {
+  ringCount = 0;
+
+  const doRingOnce = () => {
+    ringCount++;
+    const statusEl = document.getElementById('callStatusText');
+    if (statusEl && (!activeCall || !activeCall.answered)) {
+      statusEl.textContent = mode === 'outgoing'
+        ? `📞 Çalıyor... (${ringCount} / ${MAX_RINGS})`
+        : `📲 Gelen Arama Çalıyor... (${ringCount} / ${MAX_RINGS})`;
+    }
+
+    // 10 kez çaldıktan sonra cevap verilmezse aramayı sonlandır!
+    if (ringCount > MAX_RINGS) {
+      stopRingtone();
+      if (mode === 'outgoing' && activeCall && !activeCall.answered) {
+        const missedCallId = activeCall.callId;
+        const targetId = activeCall.targetUserId;
+        const cType = activeCall.callType;
+
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({
+            type: 'CALL_MISSED',
+            callId: missedCallId,
+            targetUserId: targetId,
+            callType: cType
+          }));
+        }
+        closeCallScreen();
+        loadCallLogs();
+        alert('📵 Aradığınız kişi cevap vermiyor.');
+      } else if (mode === 'incoming') {
+        closeCallScreen();
+        missedCallCount++;
+        updateMissedBadge();
+        loadCallLogs();
+      }
+      return;
+    }
+
     try {
       const ctx = new (window.AudioContext || window.webkitAudioContext)();
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
-      osc.frequency.value = 520;
+      osc.frequency.value = mode === 'incoming' ? 680 : 460;
       gain.gain.value = 0.08;
       osc.connect(gain);
       gain.connect(ctx.destination);
       osc.start();
-      osc.stop(ctx.currentTime + 0.3);
-      if ('vibrate' in navigator) navigator.vibrate([400, 200, 400]);
+      osc.stop(ctx.currentTime + 0.35);
+      if (mode === 'incoming' && 'vibrate' in navigator) {
+        navigator.vibrate([500, 200, 500]);
+      }
     } catch {}
   };
-  beep();
-  ringInterval = setInterval(beep, 2200);
+
+  doRingOnce();
+  ringInterval = setInterval(doRingOnce, 2400);
 }
 
 function stopRingtone() {
@@ -1071,6 +1121,26 @@ async function getUserMediaSafe(callType) {
     });
   } catch {
     try { return await navigator.mediaDevices.getUserMedia({ audio: true, video: false }); } catch { return null; }
+  }
+}
+
+async function attachLocalPreview(stream) {
+  const localVid = document.getElementById('localVideo');
+  const hasVid = Boolean(stream && stream.getVideoTracks().length > 0);
+  localVid.muted = true;
+  localVid.playsInline = true;
+  localVid.srcObject = stream;
+  localVid.classList.toggle('hidden', !hasVid);
+  if (hasVid) {
+    await localVid.play().catch(() => {});
+    if (!captureVideoEl) {
+      captureVideoEl = document.createElement('video');
+      captureVideoEl.muted = true;
+      captureVideoEl.playsInline = true;
+      captureVideoEl.autoplay = true;
+    }
+    captureVideoEl.srcObject = stream;
+    await captureVideoEl.play().catch(() => {});
   }
 }
 
@@ -1107,6 +1177,9 @@ async function setupPeerConnection(targetUserId, callId) {
     remoteAud.muted = false;
     remoteVid.play().catch(() => {});
     remoteAud.play().catch(() => {});
+    if (ev.track && ev.track.kind === 'video') {
+      document.getElementById('callCenterAvatar').classList.add('hidden');
+    }
   };
 
   if (statsInterval) clearInterval(statsInterval);
@@ -1125,11 +1198,15 @@ async function setupPeerConnection(targetUserId, callId) {
       webrtcAudioActive = (aBytes - lastAudioBytes) > 500;
       webrtcVideoActive = (vBytes - lastVideoBytes) > 1500;
       lastAudioBytes = aBytes; lastVideoBytes = vBytes;
-      if (webrtcVideoActive) document.getElementById('remoteRelayImg').classList.add('hidden');
+      if (webrtcVideoActive) {
+        document.getElementById('remoteRelayImg').classList.add('hidden');
+        document.getElementById('callCenterAvatar').classList.add('hidden');
+      }
     } catch {}
   }, 1000);
 }
 
+// Çift yönlü kesintisiz ses + video karesi rölesi (CGNAT arkasında bile görüntünün gidip gelmesini garanti eder)
 function startWsMediaRelay() {
   stopWsMediaRelay();
   if (!localStream || !activeCall) return;
@@ -1176,19 +1253,31 @@ function startWsMediaRelay() {
   const vTrack = localStream.getVideoTracks()[0];
   if (vTrack) {
     const canvas = document.createElement('canvas');
-    canvas.width = 240; canvas.height = 320;
+    canvas.width = 280; canvas.height = 360;
     const c2d = canvas.getContext('2d');
-    const localVid = document.getElementById('localVideo');
 
     wsVideoTimer = setInterval(() => {
       if (!activeCall || !ws || ws.readyState !== WebSocket.OPEN) return;
       const vt = localStream?.getVideoTracks()[0];
-      if (!vt || !vt.enabled || !localVid || localVid.readyState < 2) return;
+      const srcEl = captureVideoEl || document.getElementById('localVideo');
+      if (!vt || !vt.enabled || !srcEl) return;
+      if (srcEl.paused) srcEl.play().catch(() => {});
+      if (srcEl.readyState < 2) return;
+
       try {
-        c2d.drawImage(localVid, 0, 0, canvas.width, canvas.height);
-        ws.send(JSON.stringify({ type: 'CALL_MEDIA', kind: 'video', targetUserId: activeCall.targetUserId, frameUrl: canvas.toDataURL('image/jpeg', 0.48) }));
+        const vw = srcEl.videoWidth || 280;
+        const vh = srcEl.videoHeight || 360;
+        canvas.width = 280;
+        canvas.height = Math.round((280 * vh) / vw) || 360;
+        c2d.drawImage(srcEl, 0, 0, canvas.width, canvas.height);
+        ws.send(JSON.stringify({
+          type: 'CALL_MEDIA',
+          kind: 'video',
+          targetUserId: activeCall.targetUserId,
+          frameUrl: canvas.toDataURL('image/jpeg', 0.52)
+        }));
       } catch {}
-    }, 240);
+    }, 200);
   }
 }
 
@@ -1202,6 +1291,13 @@ function stopWsMediaRelay() {
 
 function handleIncomingWsMedia(ev) {
   if (!activeCall) return;
+  if (!activeCall.answered) {
+    activeCall.answered = true;
+    stopRingtone();
+    document.getElementById('callStatusText').textContent = '🟢 Görüşme Aktif';
+    if (!wsAudioProc && !wsVideoTimer) startWsMediaRelay();
+  }
+
   if (ev.kind === 'audio' && ev.pcmB64 && !webrtcAudioActive) {
     try {
       const ctx = ensureAudioEngine();
@@ -1225,6 +1321,7 @@ function handleIncomingWsMedia(ev) {
     const img = document.getElementById('remoteRelayImg');
     img.src = ev.frameUrl;
     img.classList.remove('hidden');
+    document.getElementById('callCenterAvatar').classList.add('hidden');
   }
 }
 
@@ -1239,20 +1336,19 @@ async function initiateCall(callType) {
   document.getElementById('remoteVideo').play().catch(() => {});
   document.getElementById('remoteAudio').play().catch(() => {});
 
-  activeCall = { callId, targetUserId: activePeer.id, callType };
+  activeCall = { callId, targetUserId: activePeer.id, callType, answered: false, startedAt: Date.now() };
   document.getElementById('callScreen').classList.remove('hidden');
   document.getElementById('incomingCallControls').classList.add('hidden');
   document.getElementById('activeCallControls').classList.remove('hidden');
   document.getElementById('remoteRelayImg').classList.add('hidden');
+  document.getElementById('callCenterAvatar').classList.remove('hidden');
   document.getElementById('callPeerTitle').textContent = activePeer.display_name;
-  document.getElementById('callStatusText').textContent = callType === 'video' ? '📹 Görüntülü Aranıyor...' : '📞 Sesli Aranıyor...';
-  startRingtone();
+  document.getElementById('callPeerBigAvatar').textContent = activePeer.display_name[0].toUpperCase();
+
+  startRingCycle('outgoing');
 
   localStream = await getUserMediaSafe(callType);
-  const localVid = document.getElementById('localVideo');
-  localVid.srcObject = localStream;
-  localVid.classList.toggle('hidden', !localStream || localStream.getVideoTracks().length === 0);
-  if (localStream) localVid.play().catch(() => {});
+  await attachLocalPreview(localStream);
 
   await setupPeerConnection(activePeer.id, callId);
   if (localStream) localStream.getTracks().forEach((t) => pc.addTrack(t, localStream));
@@ -1264,13 +1360,14 @@ async function initiateCall(callType) {
 }
 
 function showIncomingCallScreen(offerData) {
-  startRingtone();
   document.getElementById('callScreen').classList.remove('hidden');
   document.getElementById('incomingCallControls').classList.remove('hidden');
   document.getElementById('activeCallControls').classList.add('hidden');
   document.getElementById('remoteRelayImg').classList.add('hidden');
+  document.getElementById('callCenterAvatar').classList.remove('hidden');
   document.getElementById('callPeerTitle').textContent = offerData.fromDisplayName;
-  document.getElementById('callStatusText').textContent = offerData.callType === 'video' ? '📹 Gelen Görüntülü Arama...' : '📞 Gelen Sesli Arama...';
+  document.getElementById('callPeerBigAvatar').textContent = (offerData.fromDisplayName || 'A')[0].toUpperCase();
+  startRingCycle('incoming');
 }
 
 document.getElementById('acceptCallBtn').onclick = acceptIncomingCall;
@@ -1284,16 +1381,13 @@ async function acceptIncomingCall() {
   document.getElementById('remoteVideo').play().catch(() => {});
   document.getElementById('remoteAudio').play().catch(() => {});
 
-  activeCall = { callId: offer.callId, targetUserId: offer.fromUserId, callType: offer.callType };
+  activeCall = { callId: offer.callId, targetUserId: offer.fromUserId, callType: offer.callType, answered: true, startedAt: Date.now() };
   document.getElementById('incomingCallControls').classList.add('hidden');
   document.getElementById('activeCallControls').classList.remove('hidden');
   document.getElementById('callStatusText').textContent = '🟢 Görüşme Aktif';
 
   localStream = await getUserMediaSafe(offer.callType);
-  const localVid = document.getElementById('localVideo');
-  localVid.srcObject = localStream;
-  localVid.classList.toggle('hidden', !localStream || localStream.getVideoTracks().length === 0);
-  if (localStream) localVid.play().catch(() => {});
+  await attachLocalPreview(localStream);
 
   await setupPeerConnection(offer.fromUserId, offer.callId);
   if (localStream) localStream.getTracks().forEach((t) => pc.addTrack(t, localStream));
@@ -1309,14 +1403,38 @@ async function acceptIncomingCall() {
   startWsMediaRelay();
 }
 
-document.getElementById('rejectCallBtn').onclick = () => {
-  if (incomingOffer && ws) ws.send(JSON.stringify({ type: 'CALL_REJECT', callId: incomingOffer.callId, targetUserId: incomingOffer.fromUserId }));
+document.getElementById('rejectCallBtn').onclick = async () => {
+  if (incomingOffer) {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'CALL_REJECT', callId: incomingOffer.callId, targetUserId: incomingOffer.fromUserId }));
+    }
+    await api('/api/calls/log', 'POST', {
+      callId: incomingOffer.callId, callerId: incomingOffer.fromUserId, calleeId: me.id, callType: incomingOffer.callType, status: 'rejected', durationSec: 0
+    }).catch(() => {});
+  }
   closeCallScreen();
 };
-document.getElementById('hangupCallBtn').onclick = () => {
-  if (activeCall && ws) ws.send(JSON.stringify({ type: 'CALL_END', callId: activeCall.callId, targetUserId: activeCall.targetUserId }));
+
+document.getElementById('hangupCallBtn').onclick = async () => {
+  if (activeCall) {
+    const dur = activeCall.answered ? Math.max(1, Math.round((Date.now() - activeCall.startedAt) / 1000)) : 0;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: activeCall.answered ? 'CALL_END' : 'CALL_MISSED',
+        callId: activeCall.callId,
+        targetUserId: activeCall.targetUserId,
+        callType: activeCall.callType
+      }));
+    }
+    if (activeCall.answered) {
+      await api('/api/calls/log', 'POST', {
+        callId: activeCall.callId, callerId: me.id, calleeId: activeCall.targetUserId, callType: activeCall.callType, status: 'completed', durationSec: dur
+      }).catch(() => {});
+    }
+  }
   closeCallScreen();
 };
+
 document.getElementById('toggleMicBtn').onclick = () => {
   const t = localStream?.getAudioTracks()[0];
   if (t) t.enabled = !t.enabled;
@@ -1332,6 +1450,7 @@ function closeCallScreen() {
   if (statsInterval) clearInterval(statsInterval);
   if (localStream) localStream.getTracks().forEach((t) => t.stop());
   localStream = null;
+  if (captureVideoEl) captureVideoEl.srcObject = null;
   if (pc) pc.close();
   pc = null;
   activeCall = null;

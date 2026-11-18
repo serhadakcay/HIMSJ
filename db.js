@@ -8,7 +8,7 @@ if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 
-const DB_PATH = path.join(DATA_DIR, 'nexuschat_v6.sqlite');
+const DB_PATH = path.join(DATA_DIR, 'nexuschat_v7.sqlite');
 const db = new DatabaseSync(DB_PATH);
 
 db.exec(`
@@ -70,6 +70,18 @@ db.exec(`
     FOREIGN KEY (recipient_id) REFERENCES users(id) ON DELETE CASCADE
   );
 
+  CREATE TABLE IF NOT EXISTS call_logs (
+    id TEXT PRIMARY KEY,
+    caller_id TEXT NOT NULL,
+    callee_id TEXT NOT NULL,
+    call_type TEXT DEFAULT 'audio',
+    status TEXT DEFAULT 'missed',
+    duration_sec INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (caller_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (callee_id) REFERENCES users(id) ON DELETE CASCADE
+  );
+
   CREATE TABLE IF NOT EXISTS stories (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,
@@ -100,9 +112,6 @@ db.exec(`
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
   );
 `);
-
-try { db.exec("ALTER TABLE users ADD COLUMN avatar_url TEXT DEFAULT ''"); } catch {}
-try { db.exec("ALTER TABLE users ADD COLUMN bio TEXT DEFAULT 'Merhaba! NexusChat E2EE kullanıyorum.'"); } catch {}
 
 function normalizePhone(rawPhone) {
   if (!rawPhone) return '';

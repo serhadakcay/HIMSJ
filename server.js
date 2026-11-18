@@ -131,7 +131,7 @@ function getAuthUser(req) {
   const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
   if (!token) return null;
   return db.prepare(`
-    SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?
+    SELECT u.*, s.device_type as session_device_type FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?
   `).get(token) || null;
 }
 
@@ -304,7 +304,6 @@ const server = http.createServer(async (req, res) => {
         });
       }
 
-      // PROFIL FOTOĞRAFI VE DURUM BİLGİSİ GÜNCELLEME
       if (pathname === '/api/auth/profile' && req.method === 'PUT') {
         const body = await readJsonBody(req);
         const displayName = String(body.displayName || me.display_name).trim();
@@ -318,7 +317,6 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 200, { user: updated });
       }
 
-      // ŞİFRELİ MEDYA / DOSYA BLOB YÜKLEME (S3 / CDN Zero-Knowledge Modeli)
       if (pathname === '/api/blobs' && req.method === 'POST') {
         const body = await readJsonBody(req, 25 * 1024 * 1024);
         const b64 = String(body.encryptedBase64 || '');
@@ -353,7 +351,7 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 200, { ok: true });
       }
 
-      // REHBERE KİŞİ EKLEME (Çoklu Kanal + Mevcut Sistem Kullanıcılarını Keşfetme)
+      // REHBERE KİŞİ EKLEME
       if (pathname === '/api/contacts/add' && req.method === 'POST') {
         const body = await readJsonBody(req);
         let list = Array.isArray(body.contacts) ? body.contacts.slice() : [];
@@ -445,7 +443,6 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 200, { ok: true, count: addedResults.length, contacts: addedResults });
       }
 
-      // REHBER LİSTESİ + PROGRAMI KULLANAN DİĞER KİŞİLER (WhatsApp/Telegram Rehber Keşfi)
       if (pathname === '/api/contacts' && req.method === 'GET') {
         const appUrl = getPublicUrl(req);
         const rows = db.prepare(`
@@ -484,7 +481,6 @@ const server = http.createServer(async (req, res) => {
           };
         });
 
-        // Sistemde kayıtlı olup henüz rehbere eklenmemiş kullanıcıları da "Keşfet / Rehbere Ekle" için listele
         const allRegistered = db.prepare('SELECT id, display_name, phone, avatar_color, avatar_url, bio FROM users WHERE is_registered = 1').all();
         const discoverable = allRegistered
           .filter((u) => !savedIds.has(u.id))
@@ -501,7 +497,41 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 200, { contacts, discoverable });
       }
 
-      // 24 SAATLİK DURUM / HİKÂYE GÜNCELLEMELERİ (WhatsApp & Signal Stories)
+      // ARAMA GEÇMİŞİ VE CEVAPSIZ ARAMA KAYITLARI
+      if (pathname === '/api/calls' && req.method === 'GET') {
+        const rows = db.prepare(`
+          SELECT cl.*,
+                 u1.display_name as caller_name, u1.phone as caller_phone,
+                 u2.display_name as callee_name, u2.phone as callee_phone
+          FROM call_logs cl
+          JOIN users u1 ON u1.id = cl.caller_id
+          JOIN users u2 ON u2.id = cl.callee_id
+          WHERE cl.caller_id = ? OR cl.callee_id = ?
+          ORDER BY cl.created_at DESC
+          LIMIT 50
+        `).all(me.id, me.id);
+        return sendJson(res, 200, { calls: rows });
+      }
+
+      if (pathname === '/api/calls/log' && req.method === 'POST') {
+        const body = await readJsonBody(req);
+        const callId = String(body.callId || ('call_' + crypto.randomBytes(6).toString('hex')));
+        const callerId = String(body.callerId || me.id);
+        const calleeId = String(body.calleeId || '');
+        const callType = body.callType === 'video' ? 'video' : 'audio';
+        const status = ['missed', 'completed', 'rejected'].includes(body.status) ? body.status : 'missed';
+        const durationSec = Number(body.durationSec || 0);
+
+        if (calleeId) {
+          db.prepare(`
+            INSERT OR REPLACE INTO call_logs (id, caller_id, callee_id, call_type, status, duration_sec)
+            VALUES (?, ?, ?, ?, ?, ?)
+          `).run(callId, callerId, calleeId, callType, status, durationSec);
+        }
+        return sendJson(res, 201, { ok: true });
+      }
+
+      // DURUM GÜNCELLEMELERİ
       if (pathname === '/api/stories' && req.method === 'GET') {
         const allowedIds = new Set([me.id]);
         const myContacts = db.prepare('SELECT contact_user_id FROM contacts WHERE user_id = ?').all(me.id);
@@ -554,7 +584,7 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 200, { ok: true });
       }
 
-      // ŞİFRELİ MESAJLAŞMA (Metin, Resim, Dosya, Kişi Kartı, Konum)
+      // ŞİFRELİ MESAJLAŞMA
       const msgMatch = pathname.match(/^\/api\/messages\/([^/]+)$/);
       if (msgMatch) {
         const peerId = msgMatch[1];
@@ -608,7 +638,6 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
-    // Şifreli Blob Dosyaları (Zero-Knowledge: Sunucu yalnızca şifreli ikili veri sunar)
     if (pathname.startsWith('/blobs/')) {
       const safeBlob = path.basename(pathname);
       const blobPath = path.join(UPLOADS_DIR, safeBlob);
@@ -637,7 +666,6 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-// WebSocket Sinyalizasyon + CGNAT Medya Rölesi
 server.on('upgrade', (req, socket) => {
   const parsedUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   const token = parsedUrl.searchParams.get('token') || '';
@@ -710,7 +738,7 @@ server.on('upgrade', (req, socket) => {
             sendWs(socket, { type: 'PONG' });
           } else if (msg.type === 'VISIBILITY') {
             clientEntry.isForeground = Boolean(msg.visible);
-          } else if (['CALL_OFFER', 'CALL_ANSWER', 'ICE_CANDIDATE', 'CALL_REJECT', 'CALL_END', 'CALL_MEDIA'].includes(msg.type)) {
+          } else if (['CALL_OFFER', 'CALL_ANSWER', 'ICE_CANDIDATE', 'CALL_REJECT', 'CALL_END', 'CALL_MISSED', 'CALL_MEDIA'].includes(msg.type)) {
             const callId = msg.callId || ('call_' + crypto.randomBytes(6).toString('hex'));
             const packet = { ...msg, callId, fromUserId: me.id, fromDisplayName: me.display_name };
 
@@ -739,6 +767,23 @@ server.on('upgrade', (req, socket) => {
                 title: `📞 GELEN ARAMA: ${me.display_name}`,
                 body: msg.callType === 'video' ? '📹 Görüntülü Arama Geliyor — Yanıtlamak için dokunun' : '📞 Sesli Arama Geliyor — Yanıtlamak için dokunun'
               });
+              continue;
+            } else if (msg.type === 'CALL_MISSED') {
+              activeCalls.delete(callId);
+              if (msg.targetUserId) {
+                db.prepare(`
+                  INSERT OR REPLACE INTO call_logs (id, caller_id, callee_id, call_type, status, duration_sec)
+                  VALUES (?, ?, ?, ?, 'missed', 0)
+                `).run(callId, me.id, msg.targetUserId, msg.callType || 'audio');
+
+                sendToUser(msg.targetUserId, packet);
+                triggerPushToUser(msg.targetUserId, {
+                  type: 'missed-call',
+                  senderId: me.id,
+                  title: `📵 Cevapsız Arama: ${me.display_name}`,
+                  body: `${me.display_name} sizi aradı (${msg.callType === 'video' ? 'Görüntülü' : 'Sesli'})`
+                });
+              }
               continue;
             } else if (msg.type === 'ICE_CANDIDATE' && msg.candidate) {
               for (const c of activeCalls.values()) {
@@ -770,5 +815,5 @@ server.on('upgrade', (req, socket) => {
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 NexusChat v6 Ultimate Sunucusu Çalışıyor -> Port: ${PORT}`);
+  console.log(`🚀 NexusChat v7 Ultimate Sunucusu Çalışıyor -> Port: ${PORT}`);
 });
