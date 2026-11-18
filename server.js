@@ -192,7 +192,6 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { publicKey: vapidKeys.publicKey });
     }
 
-    // 1. KAYIT OLMA
     if (pathname === '/api/auth/register' && req.method === 'POST') {
       const body = await readJsonBody(req);
       const displayName = String(body.displayName || '').trim();
@@ -241,7 +240,6 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 201, { token, user });
     }
 
-    // 2. ŞİFRE İLE GİRİŞ YAPMA
     if (pathname === '/api/auth/login' && req.method === 'POST') {
       const body = await readJsonBody(req);
       const normPhone = normalizePhone(body.phone);
@@ -250,9 +248,7 @@ const server = http.createServer(async (req, res) => {
       const deviceType = body.deviceType === 'desktop' ? 'desktop' : 'mobile';
 
       const userRow = db.prepare('SELECT * FROM users WHERE phone_normalized = ? AND is_registered = 1').get(normPhone);
-      if (!userRow) {
-        return sendJson(res, 404, { error: 'Bu numaraya ait kayıtlı hesap bulunamadı. Önce Kayıt Olun.' });
-      }
+      if (!userRow) return sendJson(res, 404, { error: 'Bu numaraya ait kayıtlı hesap bulunamadı. Önce Kayıt Olun.' });
       if (!verifyPassword(password, userRow.password_hash, userRow.password_salt)) {
         return sendJson(res, 401, { error: 'Hatalı şifre girdiniz!' });
       }
@@ -283,7 +279,6 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
-    // --- KİMLİK DOĞRULAMA GEREKTİREN UÇ NOKTALAR ---
     if (pathname.startsWith('/api/')) {
       const me = getAuthUser(req);
       if (!me) return sendJson(res, 401, { error: 'Oturum geçersiz.' });
@@ -309,10 +304,7 @@ const server = http.createServer(async (req, res) => {
         const displayName = String(body.displayName || me.display_name).trim();
         const bio = String(body.bio ?? me.bio).trim();
         const avatarUrl = body.avatarUrl !== undefined ? String(body.avatarUrl) : (me.avatar_url || '');
-
-        db.prepare('UPDATE users SET display_name = ?, bio = ?, avatar_url = ? WHERE id = ?').run(
-          displayName, bio, avatarUrl, me.id
-        );
+        db.prepare('UPDATE users SET display_name = ?, bio = ?, avatar_url = ? WHERE id = ?').run(displayName, bio, avatarUrl, me.id);
         const updated = db.prepare('SELECT id, display_name, phone, phone_normalized, public_key_jwk, key_fingerprint, avatar_color, avatar_url, bio FROM users WHERE id = ?').get(me.id);
         return sendJson(res, 200, { user: updated });
       }
@@ -343,24 +335,16 @@ const server = http.createServer(async (req, res) => {
 
       if (pathname === '/api/push/unsubscribe' && req.method === 'POST') {
         const body = await readJsonBody(req);
-        if (body.endpoint) {
-          db.prepare('DELETE FROM push_subscriptions WHERE endpoint = ?').run(body.endpoint);
-        } else if (body.deviceType === 'desktop') {
-          db.prepare("DELETE FROM push_subscriptions WHERE user_id = ? AND device_type = 'desktop'").run(me.id);
-        }
+        if (body.endpoint) db.prepare('DELETE FROM push_subscriptions WHERE endpoint = ?').run(body.endpoint);
+        else if (body.deviceType === 'desktop') db.prepare("DELETE FROM push_subscriptions WHERE user_id = ? AND device_type = 'desktop'").run(me.id);
         return sendJson(res, 200, { ok: true });
       }
 
-      // REHBERE KİŞİ EKLEME
       if (pathname === '/api/contacts/add' && req.method === 'POST') {
         const body = await readJsonBody(req);
         let list = Array.isArray(body.contacts) ? body.contacts.slice() : [];
-        if (body.rawText) {
-          list.push(...parseRawContactsText(body.rawText));
-        }
-        if (list.length === 0 && (body.name || body.phone)) {
-          list.push({ name: body.name, phone: body.phone });
-        }
+        if (body.rawText) list.push(...parseRawContactsText(body.rawText));
+        if (list.length === 0 && (body.name || body.phone)) list.push({ name: body.name, phone: body.phone });
 
         const appUrl = getPublicUrl(req);
         const addedResults = [];
@@ -374,11 +358,7 @@ const server = http.createServer(async (req, res) => {
           for (const rawP of rawPhones) {
             const norm = normalizePhone(rawP);
             if (norm.length < 7) continue;
-
-            if (norm === me.phone_normalized) {
-              skippedSelf = true;
-              continue;
-            }
+            if (norm === me.phone_normalized) { skippedSelf = true; continue; }
 
             const dispPhone = formatPhoneDisplay(rawP);
             const cleanName = String(rawName || dispPhone).trim();
@@ -439,7 +419,6 @@ const server = http.createServer(async (req, res) => {
           if (skippedSelf) return sendJson(res, 400, { error: 'Kendi telefon numaranızı kişi olarak ekleyemezsiniz.' });
           return sendJson(res, 400, { error: 'Geçerli bir telefon numarası bulunamadı.' });
         }
-
         return sendJson(res, 200, { ok: true, count: addedResults.length, contacts: addedResults });
       }
 
@@ -497,7 +476,67 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 200, { contacts, discoverable });
       }
 
-      // ARAMA GEÇMİŞİ VE CEVAPSIZ ARAMA KAYITLARI
+      // HTTP ÜZERİNDEN ARAMA BAŞLATMA VE DURUM KONTROLÜ (WebSocket uyuduğunda bile %100 çalışır)
+      if (pathname === '/api/calls/offer' && req.method === 'POST') {
+        const body = await readJsonBody(req);
+        const callId = String(body.callId || ('call_' + crypto.randomBytes(6).toString('hex')));
+        const targetUserId = String(body.targetUserId || '');
+        const callType = body.callType === 'video' ? 'video' : 'audio';
+
+        const callObj = {
+          callId,
+          callerId: me.id,
+          fromUserId: me.id,
+          callerName: me.display_name,
+          fromDisplayName: me.display_name,
+          targetUserId,
+          callType,
+          sdp: body.sdp,
+          iceCandidates: [],
+          status: 'ringing',
+          createdAt: Date.now()
+        };
+        activeCalls.set(callId, callObj);
+
+        if (targetUserId) {
+          sendToUser(targetUserId, { type: 'CALL_OFFER', ...callObj }, { skipHiddenDesktop: true });
+          triggerPushToUser(targetUserId, {
+            type: 'incoming-call',
+            callId,
+            callerId: me.id,
+            callerName: me.display_name,
+            callType,
+            title: `📞 GELEN ARAMA: ${me.display_name}`,
+            body: callType === 'video' ? '📹 Görüntülü Arama Geliyor — Yanıtlamak için dokunun' : '📞 Sesli Arama Geliyor — Yanıtlamak için dokunun'
+          });
+        }
+        return sendJson(res, 201, { ok: true, callId });
+      }
+
+      if (pathname === '/api/calls/poll' && req.method === 'GET') {
+        const now = Date.now();
+        let incoming = null;
+        for (const [id, c] of activeCalls.entries()) {
+          if (now - c.createdAt > 45000) {
+            activeCalls.delete(id);
+            continue;
+          }
+          if (c.targetUserId === me.id && c.status === 'ringing') {
+            incoming = c;
+          }
+        }
+        return sendJson(res, 200, { incomingCall: incoming });
+      }
+
+      if (pathname === '/api/calls/active' && req.method === 'GET') {
+        const callId = parsedUrl.searchParams.get('callId');
+        if (callId && activeCalls.has(callId)) return sendJson(res, 200, { call: activeCalls.get(callId) });
+        for (const call of activeCalls.values()) {
+          if (call.targetUserId === me.id && call.status === 'ringing') return sendJson(res, 200, { call });
+        }
+        return sendJson(res, 404, { error: 'Aktif çağrı yok.' });
+      }
+
       if (pathname === '/api/calls' && req.method === 'GET') {
         const rows = db.prepare(`
           SELECT cl.*,
@@ -531,7 +570,6 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 201, { ok: true });
       }
 
-      // DURUM GÜNCELLEMELERİ
       if (pathname === '/api/stories' && req.method === 'GET') {
         const allowedIds = new Set([me.id]);
         const myContacts = db.prepare('SELECT contact_user_id FROM contacts WHERE user_id = ?').all(me.id);
@@ -551,12 +589,7 @@ const server = http.createServer(async (req, res) => {
             FROM story_views sv JOIN users u ON u.id = sv.viewer_id
             WHERE sv.story_id = ?
           `).all(s.id);
-          return {
-            ...s,
-            viewCount: views.length,
-            views,
-            viewedByMe: views.some((v) => v.viewer_id === me.id)
-          };
+          return { ...s, viewCount: views.length, views, viewedByMe: views.some((v) => v.viewer_id === me.id) };
         });
 
         return sendJson(res, 200, { stories });
@@ -584,7 +617,6 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 200, { ok: true });
       }
 
-      // ŞİFRELİ MESAJLAŞMA
       const msgMatch = pathname.match(/^\/api\/messages\/([^/]+)$/);
       if (msgMatch) {
         const peerId = msgMatch[1];
@@ -626,15 +658,6 @@ const server = http.createServer(async (req, res) => {
 
           return sendJson(res, 201, { message: savedMsg });
         }
-      }
-
-      if (pathname === '/api/calls/active' && req.method === 'GET') {
-        const callId = parsedUrl.searchParams.get('callId');
-        if (callId && activeCalls.has(callId)) return sendJson(res, 200, { call: activeCalls.get(callId) });
-        for (const call of activeCalls.values()) {
-          if (call.targetUserId === me.id) return sendJson(res, 200, { call });
-        }
-        return sendJson(res, 404, { error: 'Aktif çağrı yok.' });
       }
     }
 
@@ -746,11 +769,14 @@ server.on('upgrade', (req, socket) => {
               activeCalls.set(callId, {
                 callId,
                 callerId: me.id,
+                fromUserId: me.id,
                 callerName: me.display_name,
+                fromDisplayName: me.display_name,
                 targetUserId: msg.targetUserId,
                 callType: msg.callType || 'audio',
                 sdp: msg.sdp,
                 iceCandidates: [],
+                status: 'ringing',
                 createdAt: Date.now()
               });
 
@@ -768,6 +794,8 @@ server.on('upgrade', (req, socket) => {
                 body: msg.callType === 'video' ? '📹 Görüntülü Arama Geliyor — Yanıtlamak için dokunun' : '📞 Sesli Arama Geliyor — Yanıtlamak için dokunun'
               });
               continue;
+            } else if (msg.type === 'CALL_ANSWER') {
+              if (activeCalls.has(callId)) activeCalls.get(callId).status = 'answered';
             } else if (msg.type === 'CALL_MISSED') {
               activeCalls.delete(callId);
               if (msg.targetUserId) {
@@ -815,5 +843,5 @@ server.on('upgrade', (req, socket) => {
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 NexusChat v7 Ultimate Sunucusu Çalışıyor -> Port: ${PORT}`);
+  console.log(`🚀 NexusChat v8 Ultimate Sunucusu Çalışıyor -> Port: ${PORT}`);
 });

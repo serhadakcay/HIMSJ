@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="apple-mobile-web-app-title" content="NexusChat" />
-  <title>NexusChat v7 — E2EE Mesajlaşma, Durum, Rehber ve Arama</title>
+  <title>NexusChat v8 — E2EE Mesajlaşma, Durum, Rehber ve Arama</title>
   <link rel="manifest" href="/manifest.json" />
   <link rel="icon" type="image/svg+xml" href="/icon.svg" />
   <link rel="apple-touch-icon" href="/icon.svg" />
@@ -24,7 +24,6 @@
     body { background: var(--bg); color: var(--text); height: 100dvh; display: flex; flex-direction: column; overflow: hidden; font-size: var(--user-font-size); font-weight: var(--user-font-weight); }
     .hidden { display: none !important; }
 
-    /* Giriş & Kayıt Kartı */
     #authScreen { margin: auto; width: 92%; max-width: 430px; background: var(--panel); padding: 24px; border-radius: 16px; border: 1px solid var(--border); box-shadow: 0 12px 32px rgba(0,0,0,0.5); max-height: 94dvh; overflow-y: auto; }
     #authScreen h1 { color: var(--accent); font-size: 22px; margin-bottom: 6px; }
     #authScreen p { color: var(--muted); font-size: 13px; margin-bottom: 14px; }
@@ -36,7 +35,6 @@
     .btn-sec { background: var(--input); color: var(--text); border: 1px solid var(--border); }
     .btn-sm { width: auto; padding: 7px 11px; font-size: 12.5px; margin: 0; }
 
-    /* Ana Ekran */
     #appScreen { display: flex; flex: 1; height: 100%; overflow: hidden; }
     .sidebar { width: 360px; background: var(--panel); border-right: 1px solid var(--border); display: flex; flex-direction: column; }
     .top-bar { padding: 10px 12px; background: var(--header); display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); gap: 6px; }
@@ -78,7 +76,6 @@
     .composer input[type="text"] { margin: 0; flex: 1; font-size: var(--user-font-size); }
     .composer select, .composer button { width: auto; margin: 0; }
 
-    /* Modallar */
     .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,0.78); display: flex; align-items: center; justify-content: center; padding: 14px; z-index: 100; }
     .modal { width: 100%; max-width: 460px; max-height: 90dvh; overflow-y: auto; background: var(--panel); border-radius: 16px; padding: 20px; border: 1px solid var(--border); }
     .modal h3 { margin-bottom: 12px; color: var(--accent); }
@@ -89,7 +86,6 @@
     .phone-choice-row { display: flex; align-items: center; gap: 10px; padding: 11px; background: var(--input); border: 1px solid var(--border); border-radius: 10px; margin-bottom: 8px; cursor: pointer; }
     .phone-choice-row input { width: 18px; height: 18px; margin: 0; accent-color: var(--accent); }
 
-    /* Tam Ekran Arama (Gelen Arama Cevaplama / Reddetme Butonları Dahil) */
     #callScreen { position: fixed; inset: 0; background: #070b0e; z-index: 250; display: flex; flex-direction: column; justify-content: space-between; padding: 24px 16px calc(24px + env(safe-area-inset-bottom, 0px)); text-align: center; }
     .video-box { flex: 1; position: relative; border-radius: 18px; overflow: hidden; background: #111b21; margin: 14px 0; display: flex; align-items: center; justify-content: center; }
     #remoteVideo { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; z-index: 1; background: #000; }
@@ -120,9 +116,8 @@
   <input type="file" id="storyImageInput" accept="image/*" class="hidden" />
   <audio id="remoteAudio" autoplay playsinline class="hidden"></audio>
 
-  <!-- 1. Şifreli Giriş & Kayıt Ekranı -->
   <div id="authScreen">
-    <h1>🔒 NexusChat v7 E2EE</h1>
+    <h1>🔒 NexusChat v8 E2EE</h1>
     <p>Uçtan uca şifreli mesajlaşma, rehber entegrasyonu, durum paylaşımları ve görüntülü arama.</p>
     <div class="tabs">
       <button class="tab active" id="tabLogin">Giriş Yap</button>
@@ -145,7 +140,6 @@
     <button type="button" class="btn-sec" id="openInstallFromAuthBtn" style="margin-top:4px;">📲 Telefona (iOS & Android) ve Bilgisayara Kur</button>
   </div>
 
-  <!-- 2. Ana Sohbet Uygulaması -->
   <div id="appScreen" class="hidden">
     <aside class="sidebar">
       <div class="top-bar">
@@ -219,11 +213,9 @@
     </section>
   </div>
 
-  <!-- 3. Telefon Rehberi Kişi Ekleme Modalı -->
   <div id="addContactModal" class="modal-bg hidden">
     <div class="modal">
       <h3>📒 Rehbere Kişi Ekle & Keşfet</h3>
-
       <div class="card-box">
         <h4 style="color:#38bdf8;">1. Telefon Rehberinden Aktar (Android & iOS)</h4>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px;">
@@ -249,7 +241,6 @@
     </div>
   </div>
 
-  <!-- 4. Çoklu Numara Seçim Modalı -->
   <div id="choosePhoneModal" class="modal-bg hidden">
     <div class="modal">
       <h3 id="choosePhoneTitle">📱 Telefon Numarası Seçin</h3>
@@ -262,7 +253,6 @@
     </div>
   </div>
 
-  <!-- 5. Sohbet İçinde Kişi Kartı Paylaşma Modalı -->
   <div id="shareContactModal" class="modal-bg hidden">
     <div class="modal">
       <h3>👤 Sohbette Kişi Paylaş</h3>
@@ -272,7 +262,6 @@
     </div>
   </div>
 
-  <!-- 6. Durum Güncellemesi Modalı -->
   <div id="createStoryModal" class="modal-bg hidden">
     <div class="modal">
       <h3>⭕ Durum Güncellemesi Paylaş (24 Saat)</h3>
@@ -289,7 +278,6 @@
     </div>
   </div>
 
-  <!-- 7. Görünüm Modalı -->
   <div id="appearanceModal" class="modal-bg hidden">
     <div class="modal">
       <h3>🎨 Görünüm, Arkaplan Fotoğrafı ve Yazı Ayarları</h3>
@@ -322,7 +310,6 @@
     </div>
   </div>
 
-  <!-- 8. Kurulum Sihirbazı Modalı -->
   <div id="installModal" class="modal-bg hidden">
     <div class="modal">
       <h3>📲 Cep Telefonuna (iOS & Android) Kurulum</h3>
@@ -346,7 +333,6 @@
     </div>
   </div>
 
-  <!-- 9. SMS & WhatsApp Davet Modalı -->
   <div id="inviteModal" class="modal-bg hidden">
     <div class="modal">
       <h3>📲 Kişiyi Programa Davet Et</h3>
@@ -359,7 +345,6 @@
     </div>
   </div>
 
-  <!-- 10. Tam Ekran Sesli / Görüntülü Arama Ekranı (Açma Tuşu + 10 Çalma Sayacı + Çift Yönlü Görüntü) -->
   <div id="callScreen" class="hidden">
     <div>
       <span style="background:rgba(0,168,132,0.2);color:var(--accent);padding:4px 12px;border-radius:16px;font-size:12px;">🔒 Uçtan Uca Şifreli Canlı Arama</span>
@@ -376,15 +361,13 @@
       <video id="localVideo" autoplay playsinline muted></video>
     </div>
 
-    <!-- GELEN ARAMA AÇMA VE REDDETME BUTONLARI -->
     <div class="call-actions hidden" id="incomingCallControls">
       <button type="button" class="call-btn btn-green-pulse" id="acceptCallBtn">📞 Aç (Cevapla)</button>
       <button type="button" class="call-btn btn-red" id="rejectCallBtn">❌ Reddet</button>
     </div>
 
-    <!-- AKTİF ARAMA KONTROLLERİ -->
     <div class="call-actions hidden" id="activeCallControls">
-      <button type="button" class="call-btn btn-sec" id="toggleSpeakerBtn">🔈 Hoparlör</button>
+      <button type="button" class="call-btn btn-sec" id="toggleSpeakerBtn">🔈 Ahize (Hoparlör Kapalı)</button>
       <button type="button" class="call-btn btn-sec" id="toggleMicBtn">🎤 Mikrofon</button>
       <button type="button" class="call-btn btn-sec" id="toggleCamBtn">📷 Kamera</button>
       <button type="button" class="call-btn btn-red" id="hangupCallBtn">📞 Kapat</button>

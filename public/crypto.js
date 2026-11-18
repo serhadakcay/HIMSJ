@@ -45,8 +45,8 @@ class NexusE2EE {
     const peerPub = await crypto.subtle.importKey('jwk', peerJwk, { name: 'ECDH', namedCurve: 'P-256' }, false, []);
 
     const shared = await crypto.subtle.deriveBits({ name: 'ECDH', public: peerPub }, this.keyPair.privateKey, 256);
-    const chainA = await this._hkdf(shared, 'Nexus-v7-ChainA');
-    const chainB = await this._hkdf(shared, 'Nexus-v7-ChainB');
+    const chainA = await this._hkdf(shared, 'Nexus-v8-ChainA');
+    const chainB = await this._hkdf(shared, 'Nexus-v8-ChainB');
     const isLower = myJwk.x < peerJwk.x;
 
     const state = {
@@ -81,11 +81,7 @@ class NexusE2EE {
       new TextEncoder().encode(JSON.stringify(payloadObj))
     );
 
-    return {
-      msgNum,
-      iv: this._toB64(iv),
-      ciphertext: this._toB64(cipherBuf)
-    };
+    return { msgNum, iv: this._toB64(iv), ciphertext: this._toB64(cipherBuf) };
   }
 
   async decryptMessage(peerId, peerPubJwkStr, msgRow) {
@@ -144,9 +140,7 @@ class NexusE2EE {
   async decryptFileBlob(encryptedArrayBuf, mediaKeyB64, mediaIvB64, expectedSha256B64) {
     if (expectedSha256B64) {
       const actualHash = this._toB64(await crypto.subtle.digest('SHA-256', encryptedArrayBuf));
-      if (actualHash !== expectedSha256B64) {
-        throw new Error('Dosya bütünlük doğrulaması (SHA-256) başarısız!');
-      }
+      if (actualHash !== expectedSha256B64) throw new Error('Dosya bütünlük doğrulaması (SHA-256) başarısız!');
     }
     const aesKey = await crypto.subtle.importKey('raw', this._fromB64(mediaKeyB64), { name: 'AES-GCM' }, false, ['decrypt']);
     return await crypto.subtle.decrypt({ name: 'AES-GCM', iv: this._fromB64(mediaIvB64) }, aesKey, encryptedArrayBuf);

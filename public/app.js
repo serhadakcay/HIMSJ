@@ -16,7 +16,7 @@ let deferredInstallPrompt = null;
 let pendingPhoneChoiceCb = null;
 let pendingStoryImageDataUrl = '';
 
-// WebRTC + CGNAT Medya Rölesi + 10 Çalma (Ring) Kontrolü
+// WebRTC + Ahize / Handsfree (Hoparlör) Kontrolü + 10 Çalma (Ring)
 let pc = null;
 let localStream = null;
 let remoteStream = null;
@@ -27,7 +27,8 @@ let ringInterval = null;
 let ringCount = 0;
 const MAX_RINGS = 10;
 
-let isSpeakerOn = false;
+// Varsayılan olarak Handsfree (Hoparlör) KAPALI — Ses ahizeden/kulaklıktan çıkar; kullanıcı basınca hoparlör açılır!
+let isHandsfreeOn = false;
 let callAudioCtx = null;
 let speakerGain = null;
 let nextPlayTime = 0;
@@ -39,8 +40,8 @@ let webrtcVideoActive = false;
 let statsInterval = null;
 let lastAudioBytes = 0;
 let lastVideoBytes = 0;
+let callPollInterval = null;
 
-// --- GÖRÜNÜM, ARKAPLAN FOTOĞRAFI VE YAZI AYARLARI ---
 function applySavedAppearance() {
   const fSize = localStorage.getItem('nexus_font_size') || '14.5';
   const fFamily = localStorage.getItem('nexus_font_family') || '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
@@ -69,7 +70,6 @@ function applySavedAppearance() {
     }
   }
 }
-
 applySavedAppearance();
 
 document.getElementById('openAppearanceBtn').onclick = () => document.getElementById('appearanceModal').classList.remove('hidden');
@@ -110,7 +110,6 @@ function compressImageToDataUrl(file, maxDim, quality, cb) {
   reader.readAsDataURL(file);
 }
 
-// --- KURULUM ---
 window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); deferredInstallPrompt = e; });
 document.getElementById('openInstallBtn').onclick = () => document.getElementById('installModal').classList.remove('hidden');
 document.getElementById('openInstallFromAuthBtn').onclick = () => document.getElementById('installModal').classList.remove('hidden');
@@ -131,7 +130,10 @@ document.addEventListener('visibilitychange', () => {
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: 'VISIBILITY', visible: !document.hidden }));
   }
-  if (!document.hidden && token) flushPendingContactImport();
+  if (!document.hidden && token) {
+    flushPendingContactImport();
+    checkIncomingCallByHttp();
+  }
 });
 
 if ('serviceWorker' in navigator) {
@@ -143,13 +145,7 @@ if ('serviceWorker' in navigator) {
     } else if (ev.data?.type === 'ANSWER_CALL_FROM_NOTIF' && ev.data.callId) {
       const res = await api(`/api/calls/active?callId=${encodeURIComponent(ev.data.callId)}`).catch(() => null);
       if (res?.call) {
-        incomingOffer = {
-          callId: res.call.callId,
-          fromUserId: res.call.callerId,
-          fromDisplayName: res.call.callerName,
-          callType: res.call.callType,
-          sdp: res.call.sdp
-        };
+        incomingOffer = res.call;
         pendingCandidates = res.call.iceCandidates || [];
         await acceptIncomingCall();
       }
@@ -166,7 +162,6 @@ async function api(url, method = 'GET', body = null) {
   return data;
 }
 
-// Giriş / Kayıt
 document.getElementById('tabLogin').onclick = () => {
   document.getElementById('tabLogin').classList.add('active');
   document.getElementById('tabReg').classList.remove('active');
@@ -244,9 +239,39 @@ async function startApp() {
   }
 
   connectWebSocket();
+  startIncomingCallPoller();
   await flushPendingContactImport();
   await Promise.all([loadContacts(), loadStories(), loadCallLogs()]);
   renderSidebar();
+
+  const params = new URLSearchParams(location.search);
+  const answerCallId = params.get('answerCall');
+  if (answerCallId) {
+    const res = await api(`/api/calls/active?callId=${encodeURIComponent(answerCallId)}`).catch(() => null);
+    if (res?.call) {
+      incomingOffer = res.call;
+      pendingCandidates = res.call.iceCandidates || [];
+      await acceptIncomingCall();
+    }
+  }
+}
+
+function startIncomingCallPoller() {
+  if (callPollInterval) clearInterval(callPollInterval);
+  callPollInterval = setInterval(checkIncomingCallByHttp, 2500);
+}
+
+async function checkIncomingCallByHttp() {
+  if (!token || activeCall || incomingOffer) return;
+  if (deviceType === 'desktop' && document.hidden) return;
+  try {
+    const res = await api('/api/calls/poll');
+    if (res && res.incomingCall && !activeCall && !incomingOffer) {
+      incomingOffer = res.incomingCall;
+      pendingCandidates = res.incomingCall.iceCandidates || [];
+      showIncomingCallScreen(res.incomingCall);
+    }
+  } catch {}
 }
 
 document.getElementById('navChatsTab').onclick = () => switchSideTab('chats');
@@ -278,12 +303,8 @@ function switchSideTab(tab) {
 function updateMissedBadge() {
   const b = document.getElementById('missedBadge');
   if (!b) return;
-  if (missedCallCount > 0) {
-    b.textContent = String(missedCallCount);
-    b.classList.remove('hidden');
-  } else {
-    b.classList.add('hidden');
-  }
+  if (missedCallCount > 0) { b.textContent = String(missedCallCount); b.classList.remove('hidden'); }
+  else b.classList.add('hidden');
 }
 
 document.getElementById('enablePushBtn').onclick = async () => {
@@ -325,10 +346,10 @@ function connectWebSocket() {
     ws.send(JSON.stringify({ type: 'VISIBILITY', visible: !document.hidden }));
     setInterval(() => {
       if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'PING' }));
-    }, 20000);
+    }, 15000);
   };
 
-  ws.onclose = () => setTimeout(connectWebSocket, 3000);
+  ws.onclose = () => setTimeout(connectWebSocket, 2000);
 
   ws.onmessage = async (ev) => {
     const data = JSON.parse(ev.data);
@@ -352,6 +373,7 @@ function connectWebSocket() {
       }
     } else if (data.type === 'CALL_OFFER') {
       if (deviceType === 'desktop' && document.hidden) return;
+      if (activeCall || (incomingOffer && incomingOffer.callId === data.callId)) return;
       incomingOffer = data;
       showIncomingCallScreen(data);
     } else if (data.type === 'CALL_ANSWER') {
@@ -373,7 +395,6 @@ function connectWebSocket() {
     } else if (data.type === 'CALL_MEDIA') {
       handleIncomingWsMedia(data);
     } else if (data.type === 'CALL_MISSED') {
-      // Karşı taraf 10 kez çaldırıp kapattı -> Alıcı ekranında Cevapsız Arama olarak düşsün
       closeCallScreen();
       missedCallCount++;
       updateMissedBadge();
@@ -389,7 +410,6 @@ function connectWebSocket() {
   };
 }
 
-// --- VERİ YÜKLEME VE SOL PANEL ---
 async function loadContacts() {
   const data = await api('/api/contacts');
   contacts = data.contacts || [];
@@ -462,7 +482,6 @@ function renderSidebar() {
     return;
   }
 
-  // ARAMALAR VE CEVAPSIZ ARAMA GEÇMİŞİ
   if (currentSideTab === 'calls') {
     if (callLogs.length === 0) {
       listEl.innerHTML = '<div style="padding:24px;text-align:center;color:var(--muted);font-size:13px;">Henüz arama geçmişi bulunmuyor.</div>';
@@ -493,7 +512,6 @@ function renderSidebar() {
     return;
   }
 
-  // DURUM GÜNCELLEMELERİ
   if (currentSideTab === 'stories') {
     const addBox = document.createElement('div');
     addBox.style.padding = '12px 14px';
@@ -535,7 +553,6 @@ function renderSidebar() {
     return;
   }
 
-  // PROFİL & AYARLAR
   if (currentSideTab === 'settings') {
     const bigAvatar = me.avatar_url
       ? `<img src="${me.avatar_url}" style="width:100%;height:100%;object-fit:cover;" />`
@@ -612,7 +629,6 @@ document.getElementById('publishStoryBtn').onclick = async () => {
   renderSidebar();
 };
 
-// --- REHBER EKLEME (ANDROID + iOS + VCF + MANUEL) ---
 document.getElementById('openAddContactBtn').onclick = () => document.getElementById('addContactModal').classList.remove('hidden');
 document.getElementById('closeAddModalBtn').onclick = () => document.getElementById('addContactModal').classList.add('hidden');
 
@@ -651,23 +667,15 @@ function showChoosePhoneModal(contactName, phoneNumbers, callback) {
   document.getElementById('choosePhoneModal').classList.remove('hidden');
 }
 
-document.getElementById('cancelChoosePhoneBtn').onclick = () => {
-  document.getElementById('choosePhoneModal').classList.add('hidden');
-  pendingPhoneChoiceCb = null;
-};
+document.getElementById('cancelChoosePhoneBtn').onclick = () => { document.getElementById('choosePhoneModal').classList.add('hidden'); pendingPhoneChoiceCb = null; };
 document.getElementById('confirmChoosePhoneBtn').onclick = async () => {
   const checked = document.querySelector('input[name="picked_phone_opt"]:checked');
   if (!checked) return;
   const val = checked.value;
   document.getElementById('choosePhoneModal').classList.add('hidden');
-  if (pendingPhoneChoiceCb) {
-    const cb = pendingPhoneChoiceCb;
-    pendingPhoneChoiceCb = null;
-    await cb(val);
-  }
+  if (pendingPhoneChoiceCb) { const cb = pendingPhoneChoiceCb; pendingPhoneChoiceCb = null; await cb(val); }
 };
 
-// Android Contact Picker (Sekme uykudan uyanana kadar bekleyip kesin kaydeder)
 document.getElementById('pickFromPhoneBtn').onclick = () => {
   if (!window.isSecureContext) return alert('Telefon rehberine erişmek için sayfanın HTTPS adresinden açılması gerekir.');
   if (navigator.contacts && typeof navigator.contacts.select === 'function') {
@@ -682,10 +690,7 @@ document.getElementById('pickFromPhoneBtn').onclick = () => {
         const seen = new Set();
         for (const t of rawTels) {
           const digits = t.replace(/\D/g, '').slice(-10);
-          if (digits.length >= 7 && !seen.has(digits)) {
-            seen.add(digits);
-            uniqueTels.push(t);
-          }
+          if (digits.length >= 7 && !seen.has(digits)) { seen.add(digits); uniqueTels.push(t); }
         }
 
         document.getElementById('addContactModal').classList.add('hidden');
@@ -693,7 +698,7 @@ document.getElementById('pickFromPhoneBtn').onclick = () => {
         if (uniqueTels.length === 0) {
           document.getElementById('newContactName').value = contactName;
           document.getElementById('addContactModal').classList.remove('hidden');
-          return alert(`"${contactName}" kişisinde kayıtlı telefon numarası bulunamadı. Lütfen numarasını elle girin.`);
+          return alert(`"${contactName}" kişisinde kayıtlı numara bulunamadı.`);
         }
 
         if (uniqueTels.length > 1) {
@@ -707,11 +712,7 @@ document.getElementById('pickFromPhoneBtn').onclick = () => {
           await saveNewContactsWithRetry({ contacts: [{ name: contactName, phone: uniqueTels[0] }] });
         }
       })
-      .catch((err) => {
-        if (err && err.name !== 'AbortError') {
-          alert('Rehber açılamadı: ' + err.message);
-        }
-      });
+      .catch((err) => { if (err && err.name !== 'AbortError') alert('Rehber açılamadı: ' + err.message); });
   } else {
     alert('Bu cihaz doğrudan rehber penceresini desteklemiyor. "iPhone / .vcf Dosyası" veya numara kutusunu kullanın.');
   }
@@ -754,15 +755,9 @@ async function flushPendingContactImport() {
   let payload;
   try { payload = JSON.parse(raw); } catch { localStorage.removeItem('nexus_pending_contact_import'); return; }
 
-  // Android sistem rehberi kapandıktan sonra Chrome sekmesinin tam uyanmasını bekle
   if (document.hidden) {
     await new Promise((resolve) => {
-      const onVis = () => {
-        if (!document.hidden) {
-          document.removeEventListener('visibilitychange', onVis);
-          resolve();
-        }
-      };
+      const onVis = () => { if (!document.hidden) { document.removeEventListener('visibilitychange', onVis); resolve(); } };
       document.addEventListener('visibilitychange', onVis);
     });
   }
@@ -784,10 +779,7 @@ async function flushPendingContactImport() {
       }
       return;
     } catch (err) {
-      if (attempt === 4) {
-        localStorage.removeItem('nexus_pending_contact_import');
-        alert('Kişi eklenemedi: ' + err.message);
-      }
+      if (attempt === 4) { localStorage.removeItem('nexus_pending_contact_import'); alert('Kişi eklenemedi: ' + err.message); }
     }
   }
 }
@@ -800,7 +792,6 @@ function showInviteModal(contact) {
 }
 document.getElementById('closeInviteModalBtn').onclick = () => document.getElementById('inviteModal').classList.add('hidden');
 
-// --- SOHBET VE MESAJLAŞMA ---
 async function openChat(peer) {
   activePeer = peer;
   document.getElementById('appScreen').classList.add('mobile-chat');
@@ -1024,13 +1015,13 @@ async function sendTextMessage() {
   await sendEncryptedEnvelope('text', { kind: 'text', text }, ttlMs);
 }
 
-// --- SESLİ & GÖRÜNTÜLÜ ARAMA + 10 ÇALMA (RING) ZAMAN AŞIMI ---
+// --- AHİZE / HANDSFREE SES YÖNLENDİRME VE KESİNTİSİZ ARAMA ---
 function ensureAudioEngine() {
   if (!callAudioCtx || callAudioCtx.state === 'closed') {
     const Ctx = window.AudioContext || window.webkitAudioContext;
     callAudioCtx = new Ctx();
     speakerGain = callAudioCtx.createGain();
-    speakerGain.gain.value = isSpeakerOn ? 3.5 : 1.8;
+    speakerGain.gain.value = isHandsfreeOn ? 3.2 : 0.55;
     speakerGain.connect(callAudioCtx.destination);
     nextPlayTime = 0;
   }
@@ -1038,13 +1029,45 @@ function ensureAudioEngine() {
   return callAudioCtx;
 }
 
-document.getElementById('toggleSpeakerBtn').onclick = () => {
-  isSpeakerOn = !isSpeakerOn;
-  ensureAudioEngine();
-  if (speakerGain) speakerGain.gain.value = isSpeakerOn ? 3.5 : 1.8;
+async function applyAudioRouting() {
   const btn = document.getElementById('toggleSpeakerBtn');
-  btn.textContent = isSpeakerOn ? '🔊 Hoparlör Açık' : '🔈 Hoparlör';
-  btn.style.background = isSpeakerOn ? '#10b981' : '';
+  if (btn) {
+    btn.textContent = isHandsfreeOn ? '🔊 Handsfree: Açık' : '🔈 Ahize (Hoparlör Kapalı)';
+    btn.style.background = isHandsfreeOn ? '#10b981' : '';
+    btn.style.color = isHandsfreeOn ? '#0b141a' : '';
+  }
+
+  const remoteVid = document.getElementById('remoteVideo');
+  const remoteAud = document.getElementById('remoteAudio');
+  const targetVol = isHandsfreeOn ? 1.0 : 0.35;
+  if (remoteVid) remoteVid.volume = targetVol;
+  if (remoteAud) remoteAud.volume = targetVol;
+
+  if (speakerGain && callAudioCtx) {
+    speakerGain.gain.setValueAtTime(isHandsfreeOn ? 3.2 : 0.55, callAudioCtx.currentTime);
+  }
+
+  if (navigator.mediaDevices && typeof navigator.mediaDevices.enumerateDevices === 'function') {
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const outputs = devices.filter((d) => d.kind === 'audiooutput' && d.deviceId);
+      if (outputs.length > 0) {
+        const chosen = isHandsfreeOn
+          ? (outputs.find((d) => /speaker|hoparlör|hands-free|loud/i.test(d.label || '')) || outputs[outputs.length - 1])
+          : (outputs.find((d) => /earpiece|ahize|receiver|communications/i.test(d.label || '')) || outputs[0]);
+        if (chosen && chosen.deviceId) {
+          if (remoteVid && typeof remoteVid.setSinkId === 'function') await remoteVid.setSinkId(chosen.deviceId).catch(() => {});
+          if (remoteAud && typeof remoteAud.setSinkId === 'function') await remoteAud.setSinkId(chosen.deviceId).catch(() => {});
+        }
+      }
+    } catch {}
+  }
+}
+
+document.getElementById('toggleSpeakerBtn').onclick = async () => {
+  isHandsfreeOn = !isHandsfreeOn;
+  ensureAudioEngine();
+  await applyAudioRouting();
 };
 
 function startRingCycle(mode = 'outgoing') {
@@ -1060,7 +1083,6 @@ function startRingCycle(mode = 'outgoing') {
         : `📲 Gelen Arama Çalıyor... (${ringCount} / ${MAX_RINGS})`;
     }
 
-    // 10 kez çaldıktan sonra cevap verilmezse aramayı sonlandır!
     if (ringCount > MAX_RINGS) {
       stopRingtone();
       if (mode === 'outgoing' && activeCall && !activeCall.answered) {
@@ -1069,12 +1091,7 @@ function startRingCycle(mode = 'outgoing') {
         const cType = activeCall.callType;
 
         if (ws && ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({
-            type: 'CALL_MISSED',
-            callId: missedCallId,
-            targetUserId: targetId,
-            callType: cType
-          }));
+          ws.send(JSON.stringify({ type: 'CALL_MISSED', callId: missedCallId, targetUserId: targetId, callType: cType }));
         }
         closeCallScreen();
         loadCallLogs();
@@ -1098,9 +1115,7 @@ function startRingCycle(mode = 'outgoing') {
       gain.connect(ctx.destination);
       osc.start();
       osc.stop(ctx.currentTime + 0.35);
-      if (mode === 'incoming' && 'vibrate' in navigator) {
-        navigator.vibrate([500, 200, 500]);
-      }
+      if (mode === 'incoming' && 'vibrate' in navigator) navigator.vibrate([500, 200, 500]);
     } catch {}
   };
 
@@ -1175,6 +1190,7 @@ async function setupPeerConnection(targetUserId, callId) {
     remoteAud.srcObject = stream;
     remoteVid.muted = false;
     remoteAud.muted = false;
+    applyAudioRouting();
     remoteVid.play().catch(() => {});
     remoteAud.play().catch(() => {});
     if (ev.track && ev.track.kind === 'video') {
@@ -1206,7 +1222,6 @@ async function setupPeerConnection(targetUserId, callId) {
   }, 1000);
 }
 
-// Çift yönlü kesintisiz ses + video karesi rölesi (CGNAT arkasında bile görüntünün gidip gelmesini garanti eder)
 function startWsMediaRelay() {
   stopWsMediaRelay();
   if (!localStream || !activeCall) return;
@@ -1331,8 +1346,9 @@ document.getElementById('videoCallBtn').onclick = () => initiateCall('video');
 async function initiateCall(callType) {
   if (!activePeer || !activePeer.isRegistered) return alert('Bu kişi henüz uygulamaya kayıt olmamış.');
   const callId = 'call_' + Date.now();
-  isSpeakerOn = callType === 'video';
+  isHandsfreeOn = false;
   ensureAudioEngine();
+  await applyAudioRouting();
   document.getElementById('remoteVideo').play().catch(() => {});
   document.getElementById('remoteAudio').play().catch(() => {});
 
@@ -1356,7 +1372,10 @@ async function initiateCall(callType) {
   const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: callType === 'video' });
   await pc.setLocalDescription(offer);
 
-  ws.send(JSON.stringify({ type: 'CALL_OFFER', callId, targetUserId: activePeer.id, callType, sdp: offer }));
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'CALL_OFFER', callId, targetUserId: activePeer.id, callType, sdp: offer }));
+  }
+  await api('/api/calls/offer', 'POST', { callId, targetUserId: activePeer.id, callType, sdp: offer }).catch(() => {});
 }
 
 function showIncomingCallScreen(offerData) {
@@ -1365,8 +1384,8 @@ function showIncomingCallScreen(offerData) {
   document.getElementById('activeCallControls').classList.add('hidden');
   document.getElementById('remoteRelayImg').classList.add('hidden');
   document.getElementById('callCenterAvatar').classList.remove('hidden');
-  document.getElementById('callPeerTitle').textContent = offerData.fromDisplayName;
-  document.getElementById('callPeerBigAvatar').textContent = (offerData.fromDisplayName || 'A')[0].toUpperCase();
+  document.getElementById('callPeerTitle').textContent = offerData.fromDisplayName || offerData.callerName || 'Gelen Arama';
+  document.getElementById('callPeerBigAvatar').textContent = (offerData.fromDisplayName || offerData.callerName || 'A')[0].toUpperCase();
   startRingCycle('incoming');
 }
 
@@ -1376,12 +1395,14 @@ async function acceptIncomingCall() {
   stopRingtone();
   const offer = incomingOffer;
   incomingOffer = null;
-  isSpeakerOn = offer.callType === 'video';
+  const callerId = offer.fromUserId || offer.callerId;
+  isHandsfreeOn = false;
   ensureAudioEngine();
+  await applyAudioRouting();
   document.getElementById('remoteVideo').play().catch(() => {});
   document.getElementById('remoteAudio').play().catch(() => {});
 
-  activeCall = { callId: offer.callId, targetUserId: offer.fromUserId, callType: offer.callType, answered: true, startedAt: Date.now() };
+  activeCall = { callId: offer.callId, targetUserId: callerId, callType: offer.callType, answered: true, startedAt: Date.now() };
   document.getElementById('incomingCallControls').classList.add('hidden');
   document.getElementById('activeCallControls').classList.remove('hidden');
   document.getElementById('callStatusText').textContent = '🟢 Görüşme Aktif';
@@ -1389,7 +1410,7 @@ async function acceptIncomingCall() {
   localStream = await getUserMediaSafe(offer.callType);
   await attachLocalPreview(localStream);
 
-  await setupPeerConnection(offer.fromUserId, offer.callId);
+  await setupPeerConnection(callerId, offer.callId);
   if (localStream) localStream.getTracks().forEach((t) => pc.addTrack(t, localStream));
 
   await pc.setRemoteDescription(new RTCSessionDescription(offer.sdp));
@@ -1399,17 +1420,20 @@ async function acceptIncomingCall() {
   const answer = await pc.createAnswer();
   await pc.setLocalDescription(answer);
 
-  ws.send(JSON.stringify({ type: 'CALL_ANSWER', callId: offer.callId, targetUserId: offer.fromUserId, sdp: answer }));
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'CALL_ANSWER', callId: offer.callId, targetUserId: callerId, sdp: answer }));
+  }
   startWsMediaRelay();
 }
 
 document.getElementById('rejectCallBtn').onclick = async () => {
   if (incomingOffer) {
+    const callerId = incomingOffer.fromUserId || incomingOffer.callerId;
     if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'CALL_REJECT', callId: incomingOffer.callId, targetUserId: incomingOffer.fromUserId }));
+      ws.send(JSON.stringify({ type: 'CALL_REJECT', callId: incomingOffer.callId, targetUserId: callerId }));
     }
     await api('/api/calls/log', 'POST', {
-      callId: incomingOffer.callId, callerId: incomingOffer.fromUserId, calleeId: me.id, callType: incomingOffer.callType, status: 'rejected', durationSec: 0
+      callId: incomingOffer.callId, callerId, calleeId: me.id, callType: incomingOffer.callType, status: 'rejected', durationSec: 0
     }).catch(() => {});
   }
   closeCallScreen();

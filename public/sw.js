@@ -3,9 +3,7 @@ self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
 
 self.addEventListener('fetch', (event) => {
   if (event.request.method !== 'GET' || event.request.url.includes('/api/') || event.request.url.includes('/blobs/')) return;
-  event.respondWith(
-    fetch(event.request).catch(() => caches.match(event.request))
-  );
+  event.respondWith(fetch(event.request).catch(() => caches.match(event.request)));
 });
 
 self.addEventListener('push', (event) => {
@@ -24,10 +22,7 @@ self.addEventListener('push', (event) => {
       vibrate: isCall ? [600, 200, 600, 200, 600, 200, 600] : [250, 100, 250],
       data,
       actions: isCall
-        ? [
-            { action: 'answer', title: '📞 Cevapla' },
-            { action: 'reject', title: '❌ Reddet' }
-          ]
+        ? [{ action: 'answer', title: '📞 Cevapla' }, { action: 'reject', title: '❌ Reddet' }]
         : [{ action: 'open', title: '💬 Aç' }]
     });
   })());

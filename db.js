@@ -8,7 +8,7 @@ if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 
-const DB_PATH = path.join(DATA_DIR, 'nexuschat_v7.sqlite');
+const DB_PATH = path.join(DATA_DIR, 'nexuschat_v8.sqlite');
 const db = new DatabaseSync(DB_PATH);
 
 db.exec(`
@@ -115,7 +115,7 @@ db.exec(`
 
 function normalizePhone(rawPhone) {
   if (!rawPhone) return '';
-  const cleaned = String(rawPhone).replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, '').trim();
+  const cleaned = String(rawPhone).replace(/[​-‏‪-‮⁠-⁯﻿]/g, '').trim();
   let digits = cleaned.replace(/\D/g, '');
   if (!digits) return '';
   if (digits.startsWith('00')) digits = digits.slice(2);
@@ -201,12 +201,15 @@ function parseRawContactsText(rawText) {
   const results = [];
 
   if (/BEGIN:VCARD/i.test(text)) {
-    const unfolded = text.replace(/=\r?\n/g, '').replace(/\r?\n[ \t]/g, '');
+    const unfolded = text.replace(/=?
+/g, '').replace(/?
+[ 	]/g, '');
     const cards = unfolded.split(/BEGIN:VCARD/i).slice(1);
     for (const card of cards) {
       let name = '';
       const phones = [];
-      for (const line of card.split(/\r?\n/)) {
+      for (const line of card.split(/?
+/)) {
         if (/^(?:item\d+\.)?FN(?:;|:)/i.test(line)) {
           const idx = line.indexOf(':');
           if (idx !== -1) name = decodeQuotedPrintable(line.slice(0, idx), line.slice(idx + 1)) || name;
@@ -231,7 +234,8 @@ function parseRawContactsText(rawText) {
     return results;
   }
 
-  for (const line of text.split(/\r?\n/)) {
+  for (const line of text.split(/?
+/)) {
     const trimmed = line.trim();
     if (!trimmed) continue;
     const match = trimmed.match(/(?:\+|00)?\d[\d\s().-]{5,20}\d/);
