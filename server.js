@@ -919,5 +919,5 @@ server.on('upgrade', (req, socket) => {
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 NexusChat v12 Ultimate Sunucusu Çalışıyor -> Port: ${PORT}`);
+  console.log(`🚀 NexusChat v13 Ultimate Sunucusu Çalışıyor -> Port: ${PORT}`);
 });
