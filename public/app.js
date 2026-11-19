@@ -406,11 +406,17 @@ function connectWebSocket() {
       await loadContacts();
       if (currentSideTab === 'chats') renderSidebar();
     } else if (data.type === 'NEW_ENCRYPTED_MESSAGE') {
-      if (activePeer && activePeer.id === data.message.sender_id) {
-        await loadMessages(activePeer.id);
-      } else {
-        await loadContacts();
-        if (currentSideTab === 'chats') renderSidebar();
+      await loadContacts();
+      if (currentSideTab === 'chats') renderSidebar();
+      if (activePeer) {
+        const updatedPeer = contacts.find((c) => c.id === activePeer.id || c.phone === activePeer.phone);
+        if (updatedPeer) {
+          activePeer = updatedPeer;
+          updateChatHeader();
+        }
+        if (activePeer.id === data.message.sender_id) {
+          await loadMessages(activePeer.id);
+        }
       }
     } else if (data.type === 'CALL_OFFER') {
       if (deviceType === 'desktop' && document.hidden) return;
@@ -839,6 +845,11 @@ function showInviteModal(contact) {
 document.getElementById('closeInviteModalBtn').onclick = () => document.getElementById('inviteModal').classList.add('hidden');
 
 async function openChat(peer) {
+  if (!peer.isRegistered || !peer.publicKeyJwk) {
+    await loadContacts().catch(() => {});
+    const refreshed = contacts.find((c) => c.id === peer.id || c.phone === peer.phone);
+    if (refreshed) peer = refreshed;
+  }
   activePeer = peer;
   document.getElementById('appScreen').classList.add('mobile-chat');
   document.getElementById('chatHeaderActions').classList.remove('hidden');
@@ -989,7 +1000,7 @@ async function sendEncryptedEnvelope(msgType, payloadObj, ttlMs) {
     recipientPublicKeyJwk: enc.recipientPublicKeyJwk,
     ttlMs
   });
-  e2ee.plainCache.set(res.message.id, payloadObj);
+  e2ee.saveToVault(res.message.id, payloadObj);
   await loadMessages(activePeer.id);
 }
 

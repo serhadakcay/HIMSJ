@@ -1,6 +1,6 @@
 {
-  "name": "nexuschat-v10-final",
-  "version": "10.0.0",
+  "name": "nexuschat-v11-verified",
+  "version": "11.0.0",
   "description": "Kesintisiz gelen/giden arama ekranı, ahize/handsfree ses yönlendirme kontrolü, HTTP+WS çift kanallı çağrı sinyali ve E2EE mesajlaşma",
   "main": "server.js",
   "scripts": {

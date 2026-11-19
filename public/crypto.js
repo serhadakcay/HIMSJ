@@ -4,12 +4,15 @@ class NexusE2EE {
     this.publicKeyJwkStr = '';
     this.sharedKeyCache = new Map();
     this.plainCache = new Map();
+    this.vaultKey = '';
   }
 
   async initForUser(phoneNorm) {
     const storeKey = `nexus_identity_jwk_${phoneNorm}`;
-    const saved = localStorage.getItem(storeKey);
+    this.vaultKey = `nexus_plain_vault_${phoneNorm}`;
+    this._loadVaultFromDisk();
 
+    const saved = localStorage.getItem(storeKey);
     if (saved) {
       try {
         const parsed = JSON.parse(saved);
@@ -29,6 +32,29 @@ class NexusE2EE {
     this.keyPair = kp;
     this.publicKeyJwkStr = JSON.stringify(pubJwk);
     return this.publicKeyJwkStr;
+  }
+
+  _loadVaultFromDisk() {
+    if (!this.vaultKey) return;
+    try {
+      const raw = localStorage.getItem(this.vaultKey);
+      if (raw) {
+        const obj = JSON.parse(raw);
+        for (const [k, v] of Object.entries(obj)) {
+          this.plainCache.set(k, v);
+        }
+      }
+    } catch {}
+  }
+
+  saveToVault(msgId, payloadObj) {
+    if (!msgId || !payloadObj) return;
+    this.plainCache.set(msgId, payloadObj);
+    if (!this.vaultKey) return;
+    try {
+      const entries = Array.from(this.plainCache.entries()).slice(-500);
+      localStorage.setItem(this.vaultKey, JSON.stringify(Object.fromEntries(entries)));
+    } catch {}
   }
 
   async _getSharedSecretBits(remotePubJwkStr) {
@@ -84,10 +110,9 @@ class NexusE2EE {
     if (this.plainCache.has(msgRow.id)) return this.plainCache.get(msgRow.id);
 
     const isMine = msgRow.sender_id === myUserId;
-    // Gönderen bensem alıcının anahtarıyla, alıcı bensem gönderenin anahtarıyla ortak sırrı hesapla!
     const candidates = isMine
-      ? [msgRow.recipient_public_key_jwk, peerPubJwkStr]
-      : [msgRow.sender_public_key_jwk, peerPubJwkStr];
+      ? [msgRow.recipient_public_key_jwk, peerPubJwkStr, msgRow.sender_public_key_jwk]
+      : [msgRow.sender_public_key_jwk, peerPubJwkStr, msgRow.recipient_public_key_jwk];
 
     const uniqueKeys = [...new Set(candidates.filter(Boolean))];
     if (uniqueKeys.length === 0) {
@@ -109,12 +134,12 @@ class NexusE2EE {
           cipherBytes
         );
         const obj = JSON.parse(new TextDecoder().decode(plainBuf));
-        this.plainCache.set(msgRow.id, obj);
+        this.saveToVault(msgRow.id, obj);
         return obj;
       } catch {}
     }
 
-    return { kind: 'text', text: '🔒 [Şifreli Mesaj]' };
+    return { kind: 'text', text: '🔒 [Önceki oturum anahtarıyla şifrelenmiş eski mesaj]' };
   }
 
   async encryptFileBlob(arrayBuffer) {

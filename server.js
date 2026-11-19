@@ -142,12 +142,33 @@ function getPublicUrl(req) {
 }
 
 function integratePhoneContacts(userId, normPhone, displayName, displayPhone) {
+  const placeholderContacts = db.prepare(`
+    SELECT user_id, contact_user_id, contact_name, contact_phone
+    FROM contacts
+    WHERE contact_phone_normalized = ? AND contact_user_id != ?
+  `).all(normPhone, userId);
+
+  for (const pc of placeholderContacts) {
+    if (pc.user_id === userId) {
+      db.prepare('DELETE FROM contacts WHERE user_id = ? AND contact_user_id = ?').run(userId, pc.contact_user_id);
+      continue;
+    }
+    db.prepare(`
+      INSERT INTO contacts (user_id, contact_user_id, contact_name, contact_phone, contact_phone_normalized)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(user_id, contact_user_id) DO UPDATE SET
+        contact_name = excluded.contact_name,
+        contact_phone = excluded.contact_phone
+    `).run(pc.user_id, userId, pc.contact_name || displayName, pc.contact_phone || displayPhone, normPhone);
+    db.prepare('DELETE FROM contacts WHERE user_id = ? AND contact_user_id = ?').run(pc.user_id, pc.contact_user_id);
+  }
+
   const savers = db.prepare(`
     SELECT c.user_id, u.display_name as saver_name, u.phone as saver_phone, u.phone_normalized as saver_norm
     FROM contacts c
     JOIN users u ON u.id = c.user_id
-    WHERE c.contact_phone_normalized = ? AND c.user_id != ?
-  `).all(normPhone, userId);
+    WHERE (c.contact_user_id = ? OR c.contact_phone_normalized = ?) AND c.user_id != ?
+  `).all(userId, normPhone, userId);
 
   for (const s of savers) {
     db.prepare(`
@@ -452,11 +473,18 @@ const server = http.createServer(async (req, res) => {
         const appUrl = getPublicUrl(req);
         const rows = db.prepare(`
           SELECT c.contact_name, c.contact_phone, c.contact_phone_normalized,
-                 u.id, u.is_registered, u.public_key_jwk, u.key_fingerprint, u.avatar_color, u.avatar_url, u.bio
+                 COALESCE(reg.id, u.id) as id,
+                 COALESCE(reg.is_registered, u.is_registered) as is_registered,
+                 COALESCE(NULLIF(reg.public_key_jwk, ''), u.public_key_jwk) as public_key_jwk,
+                 COALESCE(NULLIF(reg.key_fingerprint, ''), u.key_fingerprint) as key_fingerprint,
+                 COALESCE(reg.avatar_color, u.avatar_color) as avatar_color,
+                 COALESCE(NULLIF(reg.avatar_url, ''), u.avatar_url) as avatar_url,
+                 COALESCE(NULLIF(reg.bio, ''), u.bio) as bio
           FROM contacts c
           JOIN users u ON u.id = c.contact_user_id
+          LEFT JOIN users reg ON reg.phone_normalized = c.contact_phone_normalized AND reg.is_registered = 1
           WHERE c.user_id = ?
-          ORDER BY u.is_registered DESC, c.contact_name ASC
+          ORDER BY is_registered DESC, c.contact_name ASC
         `).all(me.id);
 
         const savedIds = new Set(rows.map((r) => r.id));
@@ -648,12 +676,20 @@ const server = http.createServer(async (req, res) => {
         const peerId = msgMatch[1];
 
         if (req.method === 'GET') {
+          const peerInfo = db.prepare('SELECT phone_normalized FROM users WHERE id = ?').get(peerId);
+          const peerIds = [peerId];
+          if (peerInfo && peerInfo.phone_normalized) {
+            const alts = db.prepare('SELECT id FROM users WHERE phone_normalized = ?').all(peerInfo.phone_normalized);
+            for (const a of alts) if (!peerIds.includes(a.id)) peerIds.push(a.id);
+          }
+          const placeholders = peerIds.map(() => '?').join(',');
           const rows = db.prepare(`
             SELECT * FROM messages
-            WHERE (sender_id = ? AND recipient_id = ?) OR (sender_id = ? AND recipient_id = ?)
+            WHERE (sender_id = ? AND recipient_id IN (${placeholders}))
+               OR (sender_id IN (${placeholders}) AND recipient_id = ?)
             ORDER BY created_at ASC, rowid ASC
             LIMIT 250
-          `).all(me.id, peerId, peerId, me.id);
+          `).all(me.id, ...peerIds, ...peerIds, me.id);
           return sendJson(res, 200, { messages: rows });
         }
 
@@ -872,5 +908,5 @@ server.on('upgrade', (req, socket) => {
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 NexusChat v10 Ultimate Sunucusu Çalışıyor -> Port: ${PORT}`);
+  console.log(`🚀 NexusChat v11 Ultimate Sunucusu Çalışıyor -> Port: ${PORT}`);
 });
