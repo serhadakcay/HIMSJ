@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>NSContactsUsageDescription</key>
+    <string>Yeni kişileri rehberinize kaydedebilmek için erişim izni gerekiyor.</string>
+    <key>NSCameraUsageDescription</key>
+    <string>Görüntülü arama yapabilmek için kamera izni gerekiyor.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Sesli ve görüntülü arama yapabilmek için mikrofon izni gerekiyor.</string>
+</dict>
+</plist>

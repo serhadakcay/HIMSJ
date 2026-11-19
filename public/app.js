@@ -1,3 +1,39 @@
+
+// --- TELEFONUN KENDİ REHBERİNE (ANDROID & iOS) KİŞİ KAYDETME MOTORU ---
+function normalizeE164Client(rawPhone) {
+  let digits = String(rawPhone || '').replace(/\D/g, '');
+  if (!digits) return '';
+  if (digits.startsWith('00')) digits = digits.slice(2);
+  if (digits.length === 10 && !digits.startsWith('90')) digits = '90' + digits;
+  else if (digits.length === 11 && digits.startsWith('0')) digits = '90' + digits.slice(1);
+  return '+' + digits;
+}
+
+function saveContactToDevicePhoneBook(contactName, rawPhone) {
+  const e164 = normalizeE164Client(rawPhone);
+  const cleanName = String(contactName || e164 || 'Yeni Kişi').trim();
+  if (!e164) return;
+
+  // 1. Native Android (Kotlin ContactsContract.Intents.Insert.ACTION) / iOS (Swift CNContactStore) Köprüsü:
+  if (window.AndroidNative && typeof window.AndroidNative.insertContact === 'function') {
+    window.AndroidNative.insertContact(cleanName, e164);
+    return;
+  }
+  if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.insertContact) {
+    window.webkit.messageHandlers.insertContact.postMessage({ name: cleanName, phone: e164 });
+    return;
+  }
+
+  // 2. Android & iOS Tarayıcıda vCard 3.0 (.vcf) -> Telefonun kendi "Yeni Kişi Ekle / Rehbere Kaydet" ekranını açar
+  const vcardUrl = `/api/vcard?name=${encodeURIComponent(cleanName)}&phone=${encodeURIComponent(e164)}`;
+  const a = document.createElement('a');
+  a.href = vcardUrl;
+  a.download = `${cleanName.replace(/[^a-zA-Z0-9_-]/g, '_')}.vcf`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
 const e2ee = new NexusE2EE();
 const isMobileDevice = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || '');
 const deviceType = isMobileDevice ? 'mobile' : 'desktop';
@@ -732,7 +768,12 @@ document.getElementById('manualContactForm').onsubmit = async (e) => {
   e.preventDefault();
   const name = document.getElementById('newContactName').value.trim();
   const phone = document.getElementById('newContactPhone').value.trim();
+  const alsoDevice = document.getElementById('alsoSaveToPhoneBook')?.checked;
+
   await saveNewContactsWithRetry({ contacts: [{ name, phone }] });
+  if (alsoDevice && phone) {
+    setTimeout(() => saveContactToDevicePhoneBook(name || phone, phone), 500);
+  }
   document.getElementById('newContactName').value = '';
   document.getElementById('newContactPhone').value = '';
 };
@@ -788,6 +829,10 @@ function showInviteModal(contact) {
   document.getElementById('invitePreviewText').textContent = `"${contact.inviteText}"`;
   document.getElementById('inviteWaLink').href = contact.whatsappUrl;
   document.getElementById('inviteSmsLink').href = contact.smsUrl;
+  const devSaveBtn = document.getElementById('inviteSaveDeviceContactBtn');
+  if (devSaveBtn) {
+    devSaveBtn.onclick = () => saveContactToDevicePhoneBook(contact.display_name, contact.phone);
+  }
   document.getElementById('inviteModal').classList.remove('hidden');
 }
 document.getElementById('closeInviteModalBtn').onclick = () => document.getElementById('inviteModal').classList.add('hidden');
@@ -824,6 +869,8 @@ function updateChatHeader() {
     ? (activePeer.online ? `🟢 Çevrimiçi • ${activePeer.phone}` : `🔴 Çevrimdışı • ${activePeer.phone}`)
     : `⏳ Henüz katılmadı • ${activePeer.phone}`;
 
+  const devBtn = document.getElementById('saveToDeviceContactsBtn');
+  if (devBtn) devBtn.onclick = () => saveContactToDevicePhoneBook(activePeer.display_name, activePeer.phone);
   document.getElementById('waInviteBtn').onclick = () => window.open(activePeer.whatsappUrl, '_blank');
   document.getElementById('smsInviteBtn').onclick = () => { location.href = activePeer.smsUrl; };
 }

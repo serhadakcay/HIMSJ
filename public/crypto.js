@@ -45,8 +45,8 @@ class NexusE2EE {
     const peerPub = await crypto.subtle.importKey('jwk', peerJwk, { name: 'ECDH', namedCurve: 'P-256' }, false, []);
 
     const shared = await crypto.subtle.deriveBits({ name: 'ECDH', public: peerPub }, this.keyPair.privateKey, 256);
-    const chainA = await this._hkdf(shared, 'Nexus-v8-ChainA');
-    const chainB = await this._hkdf(shared, 'Nexus-v8-ChainB');
+    const chainA = await this._hkdf(shared, 'Nexus-v9-ChainA');
+    const chainB = await this._hkdf(shared, 'Nexus-v9-ChainB');
     const isLower = myJwk.x < peerJwk.x;
 
     const state = {

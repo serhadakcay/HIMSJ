@@ -8,7 +8,7 @@ if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 
-const DB_PATH = path.join(DATA_DIR, 'nexuschat_v8.sqlite');
+const DB_PATH = path.join(DATA_DIR, 'nexuschat_v9.sqlite');
 const db = new DatabaseSync(DB_PATH);
 
 db.exec(`
@@ -201,14 +201,17 @@ function parseRawContactsText(rawText) {
   const results = [];
 
   if (/BEGIN:VCARD/i.test(text)) {
-    const unfolded = text.replace(/=?
-/g, '').replace(/?
+    const unfolded = text.replace(/=
+?
+/g, '').replace(/
+?
 [ 	]/g, '');
     const cards = unfolded.split(/BEGIN:VCARD/i).slice(1);
     for (const card of cards) {
       let name = '';
       const phones = [];
-      for (const line of card.split(/?
+      for (const line of card.split(/
+?
 /)) {
         if (/^(?:item\d+\.)?FN(?:;|:)/i.test(line)) {
           const idx = line.indexOf(':');
@@ -234,7 +237,8 @@ function parseRawContactsText(rawText) {
     return results;
   }
 
-  for (const line of text.split(/?
+  for (const line of text.split(/
+?
 /)) {
     const trimmed = line.trim();
     if (!trimmed) continue;

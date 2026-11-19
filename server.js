@@ -183,6 +183,32 @@ const server = http.createServer(async (req, res) => {
   const pathname = parsedUrl.pathname;
 
   try {
+    
+    if (pathname === '/api/vcard' && req.method === 'GET') {
+      const rawName = String(parsedUrl.searchParams.get('name') || 'Yeni Kişi').trim();
+      const rawPhone = String(parsedUrl.searchParams.get('phone') || '').trim();
+      const norm = normalizePhone(rawPhone) || rawPhone;
+      const parts = rawName.split(/\s+/);
+      const firstName = parts[0] || rawName;
+      const lastName = parts.slice(1).join(' ');
+      const vcf = [
+        'BEGIN:VCARD',
+        'VERSION:3.0',
+        `N;CHARSET=UTF-8:${lastName};${firstName};;;`,
+        `FN;CHARSET=UTF-8:${rawName}`,
+        `TEL;TYPE=CELL,VOICE:${norm}`,
+        'END:VCARD'
+      ].join('\r\n');
+
+      const safeFileName = rawName.replace(/[^a-zA-Z0-9_-]/g, '_') || 'kisi';
+      res.writeHead(200, {
+        'Content-Type': 'text/vcard; charset=utf-8',
+        'Content-Disposition': `attachment; filename="${safeFileName}.vcf"`,
+        'Cache-Control': 'no-store'
+      });
+      return res.end(vcf);
+    }
+
     if (pathname === '/healthz') {
       res.writeHead(200, { 'Content-Type': 'text/plain' });
       return res.end('OK');
@@ -843,5 +869,5 @@ server.on('upgrade', (req, socket) => {
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 NexusChat v8 Ultimate Sunucusu Çalışıyor -> Port: ${PORT}`);
+  console.log(`🚀 NexusChat v9 Ultimate Sunucusu Çalışıyor -> Port: ${PORT}`);
 });
