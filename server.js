@@ -346,6 +346,17 @@ const server = http.createServer(async (req, res) => {
         });
       }
 
+      
+      if (pathname === '/api/auth/keys' && req.method === 'PUT') {
+        const body = await readJsonBody(req);
+        const pub = String(body.publicKeyJwk || '');
+        if (pub) {
+          const fp = generateFingerprint(pub);
+          db.prepare('UPDATE users SET public_key_jwk = ?, key_fingerprint = ? WHERE id = ?').run(pub, fp, me.id);
+        }
+        return sendJson(res, 200, { ok: true });
+      }
+
       if (pathname === '/api/auth/profile' && req.method === 'PUT') {
         const body = await readJsonBody(req);
         const displayName = String(body.displayName || me.display_name).trim();
@@ -743,7 +754,7 @@ const server = http.createServer(async (req, res) => {
 
     if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
       const ext = path.extname(filePath);
-      res.writeHead(200, { 'Content-Type': MIME[ext] || 'text/plain; charset=utf-8', 'Cache-Control': 'no-cache' });
+      res.writeHead(200, { 'Content-Type': MIME[ext] || 'text/plain; charset=utf-8', 'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0', 'Pragma': 'no-cache', 'Expires': '0' });
       return fs.createReadStream(filePath).pipe(res);
     }
 
@@ -908,5 +919,5 @@ server.on('upgrade', (req, socket) => {
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 NexusChat v11 Ultimate Sunucusu Çalışıyor -> Port: ${PORT}`);
+  console.log(`🚀 NexusChat v12 Ultimate Sunucusu Çalışıyor -> Port: ${PORT}`);
 });

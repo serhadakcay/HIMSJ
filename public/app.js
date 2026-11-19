@@ -173,7 +173,7 @@ document.addEventListener('visibilitychange', () => {
 });
 
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('/sw.js').catch(() => {});
+  navigator.serviceWorker.register('/sw.js?v=12').then((reg) => reg.update().catch(() => {})).catch(() => {});
   navigator.serviceWorker.addEventListener('message', async (ev) => {
     if (ev.data?.type === 'OPEN_CHAT_FROM_NOTIF' && ev.data.peerId) {
       const peer = contacts.find((c) => c.id === ev.data.peerId);
@@ -277,6 +277,12 @@ async function startApp() {
   
   if (window.AndroidNative && typeof window.AndroidNative.requestPermissions === 'function') {
     window.AndroidNative.requestPermissions();
+  }
+
+  
+  if (e2ee.publicKeyJwkStr && me && me.public_key_jwk !== e2ee.publicKeyJwkStr) {
+    await api('/api/auth/keys', 'PUT', { publicKeyJwk: e2ee.publicKeyJwkStr }).catch(() => {});
+    me.public_key_jwk = e2ee.publicKeyJwkStr;
   }
 
   connectWebSocket();

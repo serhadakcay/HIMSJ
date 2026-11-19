@@ -1,8 +1,9 @@
-# NexusChat v11 Verified — Neden Ekran Görüntüsünde `[Şifreli Mesaj]` Görünüyordu ve Nasıl Çözüldü?
+# NexusChat v12 Fixed — Mesajların `[Şifreli Geçmiş Mesaj]` Görünmesinin Kesin Çözümü
 
-1. **Ekran Görüntüsündeki Sorunun Kök Nedeni (`⏳ Henüz katılmadı` Yer Tutucu Hesap):**
-   * Ekran görüntüsünde sohbet başlığında **"Aaşkım — ⏳ Henüz katılmadı • +90 530 885 89 26"** yazıyordu.
-   * Kişiyi ilk eklediğinizde henüz kayıtlı olmadığı için sistem ona bir **yer tutucu ID** oluşturmuştu; karşı taraf sonradan uygulamaya kayıt olduğunda farklı bir `userId` ve `public_key_jwk` aldı, ancak eski sohbet penceresi hala yer tutucu ID'ye bağlı kaldığı için gelen mesajın açık anahtarıyla eşleşemiyordu.
-2. **Kesin Çözüm (`server.js`, `crypto.js`, `app.js`):**
-   * Karşı taraf uygulamaya kayıt olduğu anda (`integratePhoneContacts` ve `GET /api/contacts`) aynı telefon numarasına (`+905308858926`) sahip eski yer tutucu kayıt otomatik olarak gerçek kayıtlı hesapla (`COALESCE(reg.id, u.id)`) ve gerçek `public_key_jwk` anahtarıyla birleştirilir.
-   * Sohbet açıldığında veya yeni mesaj geldiğinde kişi bilgisi otomatik yenilenir ve çözülen tüm mesajlar cihazdaki kalıcı kasaya (`nexus_plain_vault_...`) kaydedilir.
+1. **Neden Hala Eski Hata Görünüyordu (`[Şifreli Geçmiş Mesaj]` — Ekran Görüntüsü):**
+   * `[Şifreli Geçmiş Mesaj]` metni yalnızca eski v9 sürümündeki `crypto.js` dosyasında yer alıyordu.
+   * Mobil Chrome'daki Service Worker (`sw.js`) ve tarayıcı önbelleği eski `crypto.js` dosyasını hafızada tutmaya devam ettiği için telefon yeni şifreleme motorunu hiç yüklememişti.
+2. **Yapılan Kesin Düzeltme (`sw.js`, `index.html`, `server.js`, `app.js`):**
+   * `index.html` içindeki betikler `crypto.js?v=12` ve `app.js?v=12` olarak versiyonlandı.
+   * `sw.js` güncellenerek kurulum anında tüm eski tarayıcı önbelleklerini (`caches.delete`) otomatik silmesi sağlandı.
+   * `server.js` tüm statik dosyalara `Cache-Control: no-store, no-cache, must-revalidate` başlığı ekleyecek şekilde güncellendi ve girişte açık anahtar senkronizasyonu (`PUT /api/auth/keys`) eklendi.
