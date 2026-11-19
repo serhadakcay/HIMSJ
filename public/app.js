@@ -274,6 +274,11 @@ async function startApp() {
     registerWebPush();
   }
 
+  
+  if (window.AndroidNative && typeof window.AndroidNative.requestPermissions === 'function') {
+    window.AndroidNative.requestPermissions();
+  }
+
   connectWebSocket();
   startIncomingCallPoller();
   await flushPendingContactImport();
@@ -737,16 +742,12 @@ document.getElementById('pickFromPhoneBtn').onclick = () => {
           return alert(`"${contactName}" kişisinde kayıtlı numara bulunamadı.`);
         }
 
-        if (uniqueTels.length > 1) {
-          showChoosePhoneModal(contactName, uniqueTels, async (chosen) => {
-            const listToSave = chosen === '__ALL__'
-              ? uniqueTels.map((p, idx) => ({ name: `${contactName} (${idx + 1})`, phone: p }))
-              : [{ name: contactName, phone: chosen }];
-            await saveNewContactsWithRetry({ contacts: listToSave });
-          });
-        } else {
-          await saveNewContactsWithRetry({ contacts: [{ name: contactName, phone: uniqueTels[0] }] });
-        }
+        showChoosePhoneModal(contactName, uniqueTels, async (chosen) => {
+          const listToSave = chosen === '__ALL__'
+            ? uniqueTels.map((p, idx) => ({ name: `${contactName} (${idx + 1})`, phone: p }))
+            : [{ name: contactName, phone: chosen }];
+          await saveNewContactsWithRetry({ contacts: listToSave });
+        });
       })
       .catch((err) => { if (err && err.name !== 'AbortError') alert('Rehber açılamadı: ' + err.message); });
   } else {
@@ -915,22 +916,50 @@ async function uploadAndSendEncryptedMedia(file, kind) {
 document.getElementById('sendContactCardOpt').onclick = () => {
   document.getElementById('attachMenu').classList.add('hidden');
   const box = document.getElementById('shareContactList');
-  if (contacts.length === 0) return alert('Rehberinizde paylaşılacak kişi bulunmuyor.');
 
-  box.innerHTML = contacts.map((c) => `
-    <div class="phone-choice-row" data-cid="${c.id}">
-      <div><strong>👤 ${escapeHtml(c.display_name)}</strong><div style="font-size:12px;color:var(--muted);">${escapeHtml(c.phone)}</div></div>
-    </div>
-  `).join('');
+  if (contacts.length === 0) {
+    box.innerHTML = '<div style="font-size:12.5px;color:var(--muted);padding:8px;">Uygulama rehberinizde kayıtlı kişi yok. Yukarıdaki butondan telefon rehberinden seçebilirsiniz.</div>';
+  } else {
+    box.innerHTML = contacts.map((c) => `
+      <div class="phone-choice-row" data-cid="${c.id}">
+        <div><strong>👤 ${escapeHtml(c.display_name)}</strong><div style="font-size:12px;color:var(--muted);">${escapeHtml(c.phone)}</div></div>
+      </div>
+    `).join('');
 
-  box.querySelectorAll('.phone-choice-row').forEach((row) => {
-    row.onclick = async () => {
-      const c = contacts.find((x) => x.id === row.dataset.cid);
-      document.getElementById('shareContactModal').classList.add('hidden');
-      if (c) await sendEncryptedEnvelope('contact', { kind: 'contact', contactName: c.display_name, contactPhone: c.phone }, 0);
-    };
-  });
+    box.querySelectorAll('.phone-choice-row').forEach((row) => {
+      row.onclick = async () => {
+        const c = contacts.find((x) => x.id === row.dataset.cid);
+        document.getElementById('shareContactModal').classList.add('hidden');
+        if (c) await sendEncryptedEnvelope('contact', { kind: 'contact', contactName: c.display_name, contactPhone: c.phone }, 0);
+      };
+    });
+  }
   document.getElementById('shareContactModal').classList.remove('hidden');
+};
+
+document.getElementById('shareFromDevicePhoneBtn').onclick = () => {
+  if (!navigator.contacts || typeof navigator.contacts.select !== 'function') {
+    return alert('Bu tarayıcı doğrudan rehber erişimini desteklemiyor. Aşağıdaki listeden kişi seçebilirsiniz.');
+  }
+  navigator.contacts.select(['name', 'tel'], { multiple: false })
+    .then(async (picked) => {
+      if (!picked || picked.length === 0) return;
+      const person = picked[0];
+      const contactName = extractAllStringsDeep(person.name)[0] || 'Kişi';
+      const rawTels = extractAllStringsDeep(person.tel);
+      const uniqueTels = [...new Set(rawTels.filter(Boolean))];
+      document.getElementById('shareContactModal').classList.add('hidden');
+      if (uniqueTels.length === 0) return alert('Seçilen kişide telefon numarası bulunamadı.');
+      if (uniqueTels.length > 1) {
+        showChoosePhoneModal(contactName, uniqueTels, async (chosen) => {
+          const phoneToSend = chosen === '__ALL__' ? uniqueTels.join(', ') : chosen;
+          await sendEncryptedEnvelope('contact', { kind: 'contact', contactName, contactPhone: phoneToSend }, 0);
+        });
+      } else {
+        await sendEncryptedEnvelope('contact', { kind: 'contact', contactName, contactPhone: uniqueTels[0] }, 0);
+      }
+    })
+    .catch(() => {});
 };
 document.getElementById('closeShareContactBtn').onclick = () => document.getElementById('shareContactModal').classList.add('hidden');
 
@@ -952,7 +981,13 @@ async function sendEncryptedEnvelope(msgType, payloadObj, ttlMs) {
   if (!activePeer || !activePeer.publicKeyJwk) return;
   const enc = await e2ee.encryptMessage(activePeer.id, activePeer.publicKeyJwk, payloadObj);
   const res = await api(`/api/messages/${activePeer.id}`, 'POST', {
-    msgType, ciphertext: enc.ciphertext, iv: enc.iv, msgNum: enc.msgNum, ttlMs
+    msgType,
+    ciphertext: enc.ciphertext,
+    iv: enc.iv,
+    msgNum: enc.msgNum,
+    senderPublicKeyJwk: enc.senderPublicKeyJwk,
+    recipientPublicKeyJwk: enc.recipientPublicKeyJwk,
+    ttlMs
   });
   e2ee.plainCache.set(res.message.id, payloadObj);
   await loadMessages(activePeer.id);
@@ -966,7 +1001,7 @@ async function loadMessages(peerId) {
   for (const row of data.messages || []) {
     const isMine = row.sender_id === me.id;
     let plain = { kind: 'text', text: '🔒 [Şifreli Mesaj]' };
-    try { plain = await e2ee.decryptMessage(peerId, activePeer.publicKeyJwk, row); } catch {}
+    try { plain = await e2ee.decryptMessage(me.id, activePeer.publicKeyJwk, row); } catch {}
 
     const div = document.createElement('div');
     div.className = 'msg ' + (isMine ? 'out' : 'in');

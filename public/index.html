@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="apple-mobile-web-app-title" content="NexusChat" />
-  <title>NexusChat v9 — E2EE Mesajlaşma, Durum, Rehber ve Arama</title>
+  <title>NexusChat v10 — E2EE Mesajlaşma, Durum, Rehber ve Arama</title>
   <link rel="manifest" href="/manifest.json" />
   <link rel="icon" type="image/svg+xml" href="/icon.svg" />
   <link rel="apple-touch-icon" href="/icon.svg" />
@@ -117,7 +117,7 @@
   <audio id="remoteAudio" autoplay playsinline class="hidden"></audio>
 
   <div id="authScreen">
-    <h1>🔒 NexusChat v9 E2EE</h1>
+    <h1>🔒 NexusChat v10 E2EE</h1>
     <p>Uçtan uca şifreli mesajlaşma, rehber entegrasyonu, durum paylaşımları ve görüntülü arama.</p>
     <div class="tabs">
       <button class="tab active" id="tabLogin">Giriş Yap</button>
@@ -217,11 +217,12 @@
   <div id="addContactModal" class="modal-bg hidden">
     <div class="modal">
       <h3>📒 Rehbere Kişi Ekle & Keşfet</h3>
-      <div class="card-box">
-        <h4 style="color:#38bdf8;">1. Telefon Rehberinden Aktar (Android & iOS)</h4>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px;">
-          <button type="button" id="pickFromPhoneBtn" class="btn-sm" style="width:100%;background:#0284c7;color:#fff;">📱 Android Rehber Seç</button>
-          <button type="button" id="pickVcfFileBtn" class="btn-sm btn-sec" style="width:100%;">📂 iPhone / .vcf Dosyası</button>
+      <div class="card-box" style="border-color:#0284c7;">
+        <h4 style="color:#38bdf8;">1. Telefon Rehberinden İzin Ver & Kişi Seç</h4>
+        <p style="margin-bottom:8px;">Rehber izni vererek telefonunuzdaki kişileri açabilir ve birden fazla numarası olan kişilerde istediğiniz numarayı seçebilirsiniz.</p>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+          <button type="button" id="pickFromPhoneBtn" class="btn-sm" style="width:100%;background:#0284c7;color:#fff;">🔓 Rehber İzni Ver & Seç</button>
+          <button type="button" id="pickVcfFileBtn" class="btn-sm btn-sec" style="width:100%;">📂 iPhone / .vcf Yükle</button>
         </div>
       </div>
 
@@ -261,8 +262,9 @@
   <div id="shareContactModal" class="modal-bg hidden">
     <div class="modal">
       <h3>👤 Sohbette Kişi Paylaş</h3>
-      <p style="font-size:13px;color:var(--muted);margin-bottom:10px;">Rehberinizden göndermek istediğiniz kişiyi seçin:</p>
-      <div id="shareContactList" style="max-height:260px;overflow-y:auto;margin-bottom:10px;"></div>
+      <button type="button" id="shareFromDevicePhoneBtn" style="background:#0284c7;color:#fff;margin-bottom:10px;">📱 Telefon Rehberinden Kişi Seç ve Gönder</button>
+      <p style="font-size:12.5px;color:var(--muted);margin-bottom:8px;">Veya kayıtlı kişilerinizden seçin:</p>
+      <div id="shareContactList" style="max-height:220px;overflow-y:auto;margin-bottom:10px;"></div>
       <button type="button" class="btn-sec" id="closeShareContactBtn" style="margin-bottom:0;">İptal</button>
     </div>
   </div>

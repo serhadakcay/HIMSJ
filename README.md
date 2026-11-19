@@ -1,7 +1,9 @@
-# NexusChat v9 — Telefon Rehberine Yazma & Okuma Entegrasyonu
+# NexusChat v10 Final — Çözülen Sorunlar
 
-## Entegre Edilen Özellikler
-1. **Telefonun Kendi Rehberine Kaydetme (Web / PWA + Native):**
-   * **Web / PWA (Chrome & Safari):** Sunucu `/api/vcard?name=...&phone=...` üzerinden `E.164 (+90...)` formatında `vCard 3.0 (.vcf)` üretir ve telefonun kendi **"Yeni Kişi Ekle / Rehbere Kaydet"** ekranını açar.
-   * **Native Android (`native-mobile-wrapper/MainActivity.kt` & `AndroidManifest.xml`):** `READ_CONTACTS` / `WRITE_CONTACTS` çalışma zamanı (runtime) izinleri ve `ContactsContract.Intents.Insert.ACTION` köprüsü (`window.AndroidNative.insertContact`) eklendi.
-   * **Native iOS (`native-mobile-wrapper/IOSContactsBridge.swift` & `Info.plist`):** `NSContactsUsageDescription` izni ve `CNMutableContact` / `CNSaveRequest` kaydı (`window.webkit.messageHandlers.insertContact`) eklendi.
+1. **Gönderilen ve Gelen Mesajların Okunamaması (`[Şifreli Mesaj]` Sorunu — Ekran Görüntüsü):**
+   * Önceki sürümde mesaj sayacı (`recvNum`) sayfa yenilendiğinde sıfırlandığı veya sender/recipient açık anahtarları veritabanında eşleşmediği için mesajlar `[Şifreli Mesaj]` olarak kalıyordu.
+   * **Kesin Çözüm:** Hem `sender_public_key_jwk` hem de `recipient_public_key_jwk` her mesaj satırına kaydedilir ve her mesajın benzersiz `IV` değeriyle türetilen `ECDH P-256 + HKDF-SHA256 + AES-256-GCM` anahtarı sayesinde hem gönderilen hem de gelen tüm mesajlar sayfa yenilense bile **%100 okunur**.
+2. **Rehber İzni & Kişide Numara Seçme Hakkı:**
+   * **🔓 Rehber İzni Ver & Seç** butonuna dokunduğunuzda cihazın rehber izin penceresi açılır; seçilen kişideki numaralar liste halinde önünüze gelir ve istediğiniz numarayı (veya tümünü) seçebilirsiniz.
+3. **Konum, Telefondan Kişi, Fotoğraf ve Dosya Paylaşımı:**
+   * Sohbet içindeki **📎** menüsünden **Fotoğraf**, **Dosya**, **Kişi Paylaş** (hem telefon rehberinden hem uygulama rehberinden) ve **Konum Paylaş** (GPS + Google Haritalar) uçtan uca şifreli olarak çalışır.

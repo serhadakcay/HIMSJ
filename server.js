@@ -665,11 +665,14 @@ const server = http.createServer(async (req, res) => {
           const iv = String(body.iv || '');
           const msgNum = Number(body.msgNum || 0);
           const ttlMs = Number(body.ttlMs || 0);
+          const senderPub = String(body.senderPublicKeyJwk || me.public_key_jwk || '');
+          const peerRow = db.prepare('SELECT public_key_jwk FROM users WHERE id = ?').get(peerId);
+          const recipientPub = String(body.recipientPublicKeyJwk || (peerRow && peerRow.public_key_jwk) || '');
 
           db.prepare(`
-            INSERT INTO messages (id, sender_id, recipient_id, msg_type, ciphertext, iv, msg_num, sender_public_key_jwk, ttl_ms)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-          `).run(msgId, me.id, peerId, msgType, ciphertext, iv, msgNum, me.public_key_jwk, ttlMs);
+            INSERT INTO messages (id, sender_id, recipient_id, msg_type, ciphertext, iv, msg_num, sender_public_key_jwk, recipient_public_key_jwk, ttl_ms)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `).run(msgId, me.id, peerId, msgType, ciphertext, iv, msgNum, senderPub, recipientPub, ttlMs);
 
           const savedMsg = db.prepare('SELECT * FROM messages WHERE id = ?').get(msgId);
           sendToUser(peerId, { type: 'NEW_ENCRYPTED_MESSAGE', senderName: me.display_name, message: savedMsg });
@@ -869,5 +872,5 @@ server.on('upgrade', (req, socket) => {
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 NexusChat v9 Ultimate Sunucusu Çalışıyor -> Port: ${PORT}`);
+  console.log(`🚀 NexusChat v10 Ultimate Sunucusu Çalışıyor -> Port: ${PORT}`);
 });

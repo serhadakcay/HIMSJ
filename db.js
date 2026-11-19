@@ -8,7 +8,7 @@ if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 
-const DB_PATH = path.join(DATA_DIR, 'nexuschat_v9.sqlite');
+const DB_PATH = path.join(DATA_DIR, 'nexuschat_v10.sqlite');
 const db = new DatabaseSync(DB_PATH);
 
 db.exec(`
@@ -63,6 +63,7 @@ db.exec(`
     iv TEXT NOT NULL,
     msg_num INTEGER DEFAULT 0,
     sender_public_key_jwk TEXT DEFAULT '',
+    recipient_public_key_jwk TEXT DEFAULT '',
     ttl_ms INTEGER DEFAULT 0,
     status TEXT DEFAULT 'sent',
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,

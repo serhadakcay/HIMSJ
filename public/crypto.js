@@ -2,7 +2,7 @@ class NexusE2EE {
   constructor() {
     this.keyPair = null;
     this.publicKeyJwkStr = '';
-    this.sessions = new Map();
+    this.sharedKeyCache = new Map();
     this.plainCache = new Map();
   }
 
@@ -11,12 +11,14 @@ class NexusE2EE {
     const saved = localStorage.getItem(storeKey);
 
     if (saved) {
-      const parsed = JSON.parse(saved);
-      const priv = await crypto.subtle.importKey('jwk', parsed.priv, { name: 'ECDH', namedCurve: 'P-256' }, false, ['deriveBits']);
-      const pub = await crypto.subtle.importKey('jwk', parsed.pub, { name: 'ECDH', namedCurve: 'P-256' }, false, []);
-      this.keyPair = { privateKey: priv, publicKey: pub };
-      this.publicKeyJwkStr = JSON.stringify(parsed.pub);
-      return this.publicKeyJwkStr;
+      try {
+        const parsed = JSON.parse(saved);
+        const priv = await crypto.subtle.importKey('jwk', parsed.priv, { name: 'ECDH', namedCurve: 'P-256' }, false, ['deriveBits']);
+        const pub = await crypto.subtle.importKey('jwk', parsed.pub, { name: 'ECDH', namedCurve: 'P-256' }, false, []);
+        this.keyPair = { privateKey: priv, publicKey: pub };
+        this.publicKeyJwkStr = JSON.stringify(parsed.pub);
+        return this.publicKeyJwkStr;
+      } catch {}
     }
 
     const kp = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
@@ -29,97 +31,90 @@ class NexusE2EE {
     return this.publicKeyJwkStr;
   }
 
-  async _hkdf(rawBuf, info) {
-    const base = await crypto.subtle.importKey('raw', rawBuf, 'HKDF', false, ['deriveBits']);
-    return await crypto.subtle.deriveBits(
-      { name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(32), info: new TextEncoder().encode(info) },
-      base,
-      256
+  async _getSharedSecretBits(remotePubJwkStr) {
+    if (this.sharedKeyCache.has(remotePubJwkStr)) {
+      return this.sharedKeyCache.get(remotePubJwkStr);
+    }
+    const peerJwk = typeof remotePubJwkStr === 'string' ? JSON.parse(remotePubJwkStr) : remotePubJwkStr;
+    const peerPub = await crypto.subtle.importKey('jwk', peerJwk, { name: 'ECDH', namedCurve: 'P-256' }, false, []);
+    const sharedBits = await crypto.subtle.deriveBits({ name: 'ECDH', public: peerPub }, this.keyPair.privateKey, 256);
+    this.sharedKeyCache.set(remotePubJwkStr, sharedBits);
+    return sharedBits;
+  }
+
+  async _deriveMessageAesKey(sharedBits, ivBytes, msgNum, usages) {
+    const baseKey = await crypto.subtle.importKey('raw', sharedBits, 'HKDF', false, ['deriveKey']);
+    return await crypto.subtle.deriveKey(
+      {
+        name: 'HKDF',
+        hash: 'SHA-256',
+        salt: ivBytes,
+        info: new TextEncoder().encode(`NexusChat-v10-MsgKey:${msgNum}`)
+      },
+      baseKey,
+      { name: 'AES-GCM', length: 256 },
+      false,
+      usages
     );
   }
 
-  async _ensureSession(peerId, peerPubJwkStr) {
-    if (this.sessions.has(peerId)) return this.sessions.get(peerId);
-    const peerJwk = JSON.parse(peerPubJwkStr);
-    const myJwk = JSON.parse(this.publicKeyJwkStr);
-    const peerPub = await crypto.subtle.importKey('jwk', peerJwk, { name: 'ECDH', namedCurve: 'P-256' }, false, []);
-
-    const shared = await crypto.subtle.deriveBits({ name: 'ECDH', public: peerPub }, this.keyPair.privateKey, 256);
-    const chainA = await this._hkdf(shared, 'Nexus-v9-ChainA');
-    const chainB = await this._hkdf(shared, 'Nexus-v9-ChainB');
-    const isLower = myJwk.x < peerJwk.x;
-
-    const state = {
-      sendChain: isLower ? chainA : chainB,
-      recvChain: isLower ? chainB : chainA,
-      sendNum: 0,
-      recvNum: 0,
-      skipped: new Map()
-    };
-    this.sessions.set(peerId, state);
-    return state;
-  }
-
-  async _stepRatchet(chainBuf) {
-    const nextChain = await this._hkdf(chainBuf, 'Step-Next');
-    const msgBits = await this._hkdf(chainBuf, 'Step-Msg');
-    const aesKey = await crypto.subtle.importKey('raw', msgBits, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
-    return { nextChain, aesKey };
-  }
-
   async encryptMessage(peerId, peerPubJwkStr, payloadObj) {
-    const state = await this._ensureSession(peerId, peerPubJwkStr);
-    const { nextChain, aesKey } = await this._stepRatchet(state.sendChain);
-    state.sendChain = nextChain;
-
-    const msgNum = state.sendNum++;
+    const sharedBits = await this._getSharedSecretBits(peerPubJwkStr);
+    const msgNum = Date.now();
     const iv = crypto.getRandomValues(new Uint8Array(12));
+    const aesKey = await this._deriveMessageAesKey(sharedBits, iv, msgNum, ['encrypt']);
     const aad = new TextEncoder().encode(`nexus-msg:${msgNum}`);
+
     const cipherBuf = await crypto.subtle.encrypt(
       { name: 'AES-GCM', iv, additionalData: aad },
       aesKey,
       new TextEncoder().encode(JSON.stringify(payloadObj))
     );
 
-    return { msgNum, iv: this._toB64(iv), ciphertext: this._toB64(cipherBuf) };
+    return {
+      msgNum,
+      iv: this._toB64(iv),
+      ciphertext: this._toB64(cipherBuf),
+      senderPublicKeyJwk: this.publicKeyJwkStr,
+      recipientPublicKeyJwk: peerPubJwkStr
+    };
   }
 
-  async decryptMessage(peerId, peerPubJwkStr, msgRow) {
+  async decryptMessage(myUserId, peerPubJwkStr, msgRow) {
     if (this.plainCache.has(msgRow.id)) return this.plainCache.get(msgRow.id);
-    const remotePubStr = msgRow.sender_public_key_jwk || peerPubJwkStr;
-    if (!remotePubStr) return { text: '🔒 [Anahtar bekleniyor]' };
 
-    const state = await this._ensureSession(peerId, remotePubStr);
-    const msgNum = Number(msgRow.msg_num || 0);
-    let aesKey;
+    const isMine = msgRow.sender_id === myUserId;
+    // Gönderen bensem alıcının anahtarıyla, alıcı bensem gönderenin anahtarıyla ortak sırrı hesapla!
+    const candidates = isMine
+      ? [msgRow.recipient_public_key_jwk, peerPubJwkStr]
+      : [msgRow.sender_public_key_jwk, peerPubJwkStr];
 
-    if (state.skipped.has(msgNum)) {
-      aesKey = state.skipped.get(msgNum);
-      state.skipped.delete(msgNum);
-    } else if (msgNum >= state.recvNum) {
-      while (state.recvNum < msgNum) {
-        const step = await this._stepRatchet(state.recvChain);
-        state.recvChain = step.nextChain;
-        state.skipped.set(state.recvNum, step.aesKey);
-        state.recvNum++;
-      }
-      const cur = await this._stepRatchet(state.recvChain);
-      state.recvChain = cur.nextChain;
-      aesKey = cur.aesKey;
-      state.recvNum++;
-    } else {
-      return { text: '🔒 [Şifreli Geçmiş Mesaj]' };
+    const uniqueKeys = [...new Set(candidates.filter(Boolean))];
+    if (uniqueKeys.length === 0) {
+      return { kind: 'text', text: '🔒 [Anahtar bekleniyor]' };
     }
 
+    const msgNum = Number(msgRow.msg_num || 0);
+    const ivBytes = this._fromB64(msgRow.iv);
+    const cipherBytes = this._fromB64(msgRow.ciphertext);
     const aad = new TextEncoder().encode(`nexus-msg:${msgNum}`);
-    const plainBuf = await crypto.subtle.decrypt(
-      { name: 'AES-GCM', iv: this._fromB64(msgRow.iv), additionalData: aad },
-      aesKey,
-      this._fromB64(msgRow.ciphertext)
-    );
-    const obj = JSON.parse(new TextDecoder().decode(plainBuf));
-    this.plainCache.set(msgRow.id, obj);
-    return obj;
+
+    for (const remoteKeyStr of uniqueKeys) {
+      try {
+        const sharedBits = await this._getSharedSecretBits(remoteKeyStr);
+        const aesKey = await this._deriveMessageAesKey(sharedBits, ivBytes, msgNum, ['decrypt']);
+        const plainBuf = await crypto.subtle.decrypt(
+          { name: 'AES-GCM', iv: ivBytes, additionalData: aad },
+          aesKey,
+          cipherBytes
+        );
+        const obj = JSON.parse(new TextDecoder().decode(plainBuf));
+        this.plainCache.set(msgRow.id, obj);
+        return obj;
+      } catch {}
+    }
+
+    return { kind: 'text', text: '🔒 [Şifreli Mesaj]' };
   }
 
   async encryptFileBlob(arrayBuffer) {
