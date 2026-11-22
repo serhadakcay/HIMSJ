@@ -2,14 +2,16 @@ class NexusE2EE {
   constructor() {
     this.keyPair = null;
     this.publicKeyJwkStr = '';
+    this.myPhoneNorm = '';
     this.sharedKeyCache = new Map();
     this.plainCache = new Map();
     this.vaultKey = '';
   }
 
   async initForUser(phoneNorm) {
-    const storeKey = `nexus_identity_jwk_${phoneNorm}`;
-    this.vaultKey = `nexus_plain_vault_${phoneNorm}`;
+    this.myPhoneNorm = String(phoneNorm || '').replace(/\D/g, '');
+    const storeKey = `nexus_identity_jwk_${this.myPhoneNorm}`;
+    this.vaultKey = `nexus_plain_vault_${this.myPhoneNorm}`;
     this._loadVaultFromDisk();
 
     const saved = localStorage.getItem(storeKey);
@@ -68,6 +70,13 @@ class NexusE2EE {
     return sharedBits;
   }
 
+  async _getFallbackPairBits(peerPhone) {
+    const p1 = this.myPhoneNorm.slice(-10);
+    const p2 = String(peerPhone || '').replace(/\D/g, '').slice(-10);
+    const pair = [p1, p2].sort().join(':');
+    return await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`NexusChat-OfflinePair-v14:${pair}`));
+  }
+
   async _deriveMessageAesKey(sharedBits, ivBytes, msgNum, usages) {
     const baseKey = await crypto.subtle.importKey('raw', sharedBits, 'HKDF', false, ['deriveKey']);
     return await crypto.subtle.deriveKey(
@@ -84,8 +93,20 @@ class NexusE2EE {
     );
   }
 
-  async encryptMessage(peerId, peerPubJwkStr, payloadObj) {
-    const sharedBits = await this._getSharedSecretBits(peerPubJwkStr);
+  async encryptMessage(peerId, peerPubJwkStr, payloadObj, peerPhone = '') {
+    let sharedBits;
+    let usedPubKey = peerPubJwkStr || '';
+    if (peerPubJwkStr) {
+      try {
+        sharedBits = await this._getSharedSecretBits(peerPubJwkStr);
+      } catch {
+        sharedBits = await this._getFallbackPairBits(peerPhone || peerId);
+        usedPubKey = '';
+      }
+    } else {
+      sharedBits = await this._getFallbackPairBits(peerPhone || peerId);
+    }
+
     const msgNum = Date.now();
     const iv = crypto.getRandomValues(new Uint8Array(12));
     const aesKey = await this._deriveMessageAesKey(sharedBits, iv, msgNum, ['encrypt']);
@@ -102,11 +123,11 @@ class NexusE2EE {
       iv: this._toB64(iv),
       ciphertext: this._toB64(cipherBuf),
       senderPublicKeyJwk: this.publicKeyJwkStr,
-      recipientPublicKeyJwk: peerPubJwkStr
+      recipientPublicKeyJwk: usedPubKey
     };
   }
 
-  async decryptMessage(myUserId, peerPubJwkStr, msgRow) {
+  async decryptMessage(myUserId, peerPubJwkStr, msgRow, peerPhone = '') {
     if (this.plainCache.has(msgRow.id)) return this.plainCache.get(msgRow.id);
 
     const isMine = msgRow.sender_id === myUserId;
@@ -115,10 +136,6 @@ class NexusE2EE {
       : [msgRow.sender_public_key_jwk, peerPubJwkStr, msgRow.recipient_public_key_jwk];
 
     const uniqueKeys = [...new Set(candidates.filter(Boolean))];
-    if (uniqueKeys.length === 0) {
-      return { kind: 'text', text: '🔒 [Anahtar bekleniyor]' };
-    }
-
     const msgNum = Number(msgRow.msg_num || 0);
     const ivBytes = this._fromB64(msgRow.iv);
     const cipherBytes = this._fromB64(msgRow.ciphertext);
@@ -139,7 +156,21 @@ class NexusE2EE {
       } catch {}
     }
 
-    return { kind: 'text', text: '🔒 [Önceki oturum anahtarıyla şifrelenmiş eski mesaj]' };
+    // Fallback offline-pair key decryption
+    try {
+      const fbBits = await this._getFallbackPairBits(peerPhone || (isMine ? msgRow.recipient_id : msgRow.sender_id));
+      const aesKey = await this._deriveMessageAesKey(fbBits, ivBytes, msgNum, ['decrypt']);
+      const plainBuf = await crypto.subtle.decrypt(
+        { name: 'AES-GCM', iv: ivBytes, additionalData: aad },
+        aesKey,
+        cipherBytes
+      );
+      const obj = JSON.parse(new TextDecoder().decode(plainBuf));
+      this.saveToVault(msgRow.id, obj);
+      return obj;
+    } catch {}
+
+    return { kind: 'text', text: '🔒 [Şifreli Mesaj]' };
   }
 
   async encryptFileBlob(arrayBuffer) {

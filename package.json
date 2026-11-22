@@ -1,6 +1,6 @@
 {
-  "name": "nexuschat-v13-render-ready",
-  "version": "13.0.0",
+  "name": "nexuschat-v14-ultimate",
+  "version": "14.0.0",
   "description": "Kesintisiz gelen/giden arama ekranı, ahize/handsfree ses yönlendirme kontrolü, HTTP+WS çift kanallı çağrı sinyali ve E2EE mesajlaşma",
   "main": "server.js",
   "scripts": {

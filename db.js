@@ -8,7 +8,7 @@ if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 
-const DB_PATH = path.join(DATA_DIR, 'nexuschat_v13.sqlite');
+const DB_PATH = path.join(DATA_DIR, 'nexuschat_v14.sqlite');
 const db = new DatabaseSync(DB_PATH);
 
 db.exec(`

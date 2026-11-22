@@ -1,4 +1,4 @@
-const SW_VER = 'nexus-sw-v13';
+const SW_VER = 'nexus-sw-v14';
 
 self.addEventListener('install', (event) => {
   self.skipWaiting();
@@ -25,21 +25,32 @@ self.addEventListener('fetch', (event) => {
 self.addEventListener('push', (event) => {
   event.waitUntil((async () => {
     let data = {};
-    try { data = event.data.json(); } catch {}
+    try {
+      data = event.data ? event.data.json() : {};
+    } catch {
+      try { data = { body: event.data.text() }; } catch {}
+    }
 
     const isCall = data.type === 'incoming-call';
-    await self.registration.showNotification(data.title || 'NexusChat E2EE', {
-      body: data.body || 'Yeni bildirim',
+    const title = data.title || (isCall ? '📞 Gelen Arama' : '💬 Yeni Mesaj');
+    const body = data.body || (isCall ? 'Yanıtlamak için dokunun' : 'Yeni mesajınız var');
+
+    await self.registration.showNotification(title, {
+      body,
       icon: '/icon.svg',
       badge: '/icon.svg',
-      tag: isCall ? `call_${data.callId}` : `msg_${Date.now()}`,
+      tag: isCall ? `call_${data.callId || Date.now()}` : `msg_${data.senderId || Date.now()}`,
       requireInteraction: true,
       renotify: true,
-      vibrate: isCall ? [600, 200, 600, 200, 600, 200, 600] : [250, 100, 250],
+      silent: false,
+      vibrate: isCall ? [700, 250, 700, 250, 700, 250, 700] : [300, 120, 300],
       data,
       actions: isCall
-        ? [{ action: 'answer', title: '📞 Cevapla' }, { action: 'reject', title: '❌ Reddet' }]
-        : [{ action: 'open', title: '💬 Aç' }]
+        ? [
+            { action: 'answer', title: '📞 Cevapla' },
+            { action: 'reject', title: '❌ Reddet' }
+          ]
+        : [{ action: 'open', title: '💬 Mesajı Aç' }]
     });
   })());
 });

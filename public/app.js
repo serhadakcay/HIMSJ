@@ -211,9 +211,22 @@ document.getElementById('tabReg').onclick = () => {
   document.getElementById('loginForm').classList.add('hidden');
 };
 
+function resetSessionState() {
+  if (ws) { try { ws.onclose = null; ws.close(); } catch {} ws = null; }
+  if (callPollInterval) { clearInterval(callPollInterval); callPollInterval = null; }
+  activePeer = null;
+  contacts = [];
+  discoverableUsers = [];
+  stories = [];
+  callLogs = [];
+  e2ee.sharedKeyCache.clear();
+  e2ee.plainCache.clear();
+}
+
 document.getElementById('regForm').onsubmit = async (e) => {
   e.preventDefault();
   try {
+    resetSessionState();
     const displayName = document.getElementById('regName').value.trim();
     const phone = document.getElementById('regPhone').value.trim();
     const password = document.getElementById('regPass').value;
@@ -230,6 +243,7 @@ document.getElementById('regForm').onsubmit = async (e) => {
 document.getElementById('loginForm').onsubmit = async (e) => {
   e.preventDefault();
   try {
+    resetSessionState();
     const phone = document.getElementById('loginPhone').value.trim();
     const password = document.getElementById('loginPass').value;
     const norm = phone.replace(/\D/g, '');
@@ -293,6 +307,7 @@ async function startApp() {
 
   const params = new URLSearchParams(location.search);
   const answerCallId = params.get('answerCall');
+  const chatWithId = params.get('chatWith');
   if (answerCallId) {
     const res = await api(`/api/calls/active?callId=${encodeURIComponent(answerCallId)}`).catch(() => null);
     if (res?.call) {
@@ -300,6 +315,9 @@ async function startApp() {
       pendingCandidates = res.call.iceCandidates || [];
       await acceptIncomingCall();
     }
+  } else if (chatWithId) {
+    const peer = contacts.find((c) => c.id === chatWithId);
+    if (peer) await openChat(peer);
   }
 }
 
@@ -642,7 +660,8 @@ function renderSidebar() {
     };
     listEl.querySelector('#openAppFromSettingsBtn').onclick = () => document.getElementById('appearanceModal').classList.remove('hidden');
     listEl.querySelector('#settingsLogoutBtn').onclick = async () => {
-      if (deviceType === 'desktop') await api('/api/push/unsubscribe', 'POST', { deviceType: 'desktop' }).catch(() => {});
+      await api('/api/auth/logout', 'POST').catch(() => {});
+      resetSessionState();
       localStorage.removeItem('nexus_token');
       location.reload();
     };
@@ -863,13 +882,12 @@ async function openChat(peer) {
   updateChatHeader();
   if (currentSideTab === 'chats') renderSidebar();
 
-  const canEncrypt = Boolean(peer.isRegistered && peer.publicKeyJwk);
-  document.getElementById('msgInput').disabled = !canEncrypt;
-  document.getElementById('sendBtn').disabled = !canEncrypt;
-  document.getElementById('attachBtn').disabled = !canEncrypt;
-  document.getElementById('msgInput').placeholder = canEncrypt
+  document.getElementById('msgInput').disabled = false;
+  document.getElementById('sendBtn').disabled = false;
+  document.getElementById('attachBtn').disabled = false;
+  document.getElementById('msgInput').placeholder = peer.online
     ? 'Uçtan uca şifreli mesaj yazın...'
-    : 'Bu kişi henüz kayıtlı değil — Sağ üstten WA veya SMS ile davet edin';
+    : 'Çevrimdışı — Mesajınız iletilecek ve bildirim gidecek...';
 
   await loadMessages(peer.id);
 }
@@ -995,8 +1013,8 @@ document.getElementById('sendLocationOpt').onclick = () => {
 };
 
 async function sendEncryptedEnvelope(msgType, payloadObj, ttlMs) {
-  if (!activePeer || !activePeer.publicKeyJwk) return;
-  const enc = await e2ee.encryptMessage(activePeer.id, activePeer.publicKeyJwk, payloadObj);
+  if (!activePeer) return;
+  const enc = await e2ee.encryptMessage(activePeer.id, activePeer.publicKeyJwk || '', payloadObj, activePeer.phone || '');
   const res = await api(`/api/messages/${activePeer.id}`, 'POST', {
     msgType,
     ciphertext: enc.ciphertext,
@@ -1018,7 +1036,7 @@ async function loadMessages(peerId) {
   for (const row of data.messages || []) {
     const isMine = row.sender_id === me.id;
     let plain = { kind: 'text', text: '🔒 [Şifreli Mesaj]' };
-    try { plain = await e2ee.decryptMessage(me.id, activePeer.publicKeyJwk, row); } catch {}
+    try { plain = await e2ee.decryptMessage(me.id, activePeer.publicKeyJwk || '', row, activePeer.phone || ''); } catch {}
 
     const div = document.createElement('div');
     div.className = 'msg ' + (isMine ? 'out' : 'in');
@@ -1443,7 +1461,7 @@ document.getElementById('audioCallBtn').onclick = () => initiateCall('audio');
 document.getElementById('videoCallBtn').onclick = () => initiateCall('video');
 
 async function initiateCall(callType) {
-  if (!activePeer || !activePeer.isRegistered) return alert('Bu kişi henüz uygulamaya kayıt olmamış.');
+  if (!activePeer) return alert('Lütfen aramak istediğiniz kişiyi seçin.');
   const callId = 'call_' + Date.now();
   isHandsfreeOn = false;
   ensureAudioEngine();

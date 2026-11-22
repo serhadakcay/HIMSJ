@@ -74,14 +74,8 @@ function broadcastPresence(userId, online) {
 }
 
 async function triggerPushToUser(userId, payloadObj) {
-  const set = onlineSockets.get(userId) || new Set();
-  const hasForegroundDesktop = Array.from(set).some((c) => c.deviceType === 'desktop' && c.isForeground);
-
   const subs = db.prepare('SELECT endpoint, device_type, p256dh, auth FROM push_subscriptions WHERE user_id = ?').all(userId);
   for (const s of subs) {
-    if (s.device_type === 'desktop' && !hasForegroundDesktop) {
-      continue;
-    }
     const res = await sendWebPush(
       { endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } },
       payloadObj,
@@ -149,6 +143,11 @@ function integratePhoneContacts(userId, normPhone, displayName, displayPhone) {
   `).all(normPhone, userId);
 
   for (const pc of placeholderContacts) {
+    const oldTarget = db.prepare('SELECT is_registered FROM users WHERE id = ?').get(pc.contact_user_id);
+    if (oldTarget && oldTarget.is_registered === 1) {
+      // Asla kayıtlı bir kullanıcının kaydını veya rehber bağlantısını silme!
+      continue;
+    }
     if (pc.user_id === userId) {
       db.prepare('DELETE FROM contacts WHERE user_id = ? AND contact_user_id = ?').run(userId, pc.contact_user_id);
       continue;
@@ -329,6 +328,14 @@ const server = http.createServer(async (req, res) => {
     if (pathname.startsWith('/api/')) {
       const me = getAuthUser(req);
       if (!me) return sendJson(res, 401, { error: 'Oturum geçersiz.' });
+
+      
+      if (pathname === '/api/auth/logout' && req.method === 'POST') {
+        const authHeader = req.headers['authorization'] || '';
+        const tok = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+        if (tok) db.prepare('DELETE FROM sessions WHERE token = ?').run(tok);
+        return sendJson(res, 200, { ok: true });
+      }
 
       if (pathname === '/api/auth/me' && req.method === 'GET') {
         return sendJson(res, 200, {
@@ -565,7 +572,7 @@ const server = http.createServer(async (req, res) => {
 
         if (targetUserId) {
           sendToUser(targetUserId, { type: 'CALL_OFFER', ...callObj }, { skipHiddenDesktop: true });
-          triggerPushToUser(targetUserId, {
+          await triggerPushToUser(targetUserId, {
             type: 'incoming-call',
             callId,
             callerId: me.id,
@@ -582,7 +589,7 @@ const server = http.createServer(async (req, res) => {
         const now = Date.now();
         let incoming = null;
         for (const [id, c] of activeCalls.entries()) {
-          if (now - c.createdAt > 45000) {
+          if (now - c.createdAt > 65000) {
             activeCalls.delete(id);
             continue;
           }
@@ -724,7 +731,7 @@ const server = http.createServer(async (req, res) => {
           const savedMsg = db.prepare('SELECT * FROM messages WHERE id = ?').get(msgId);
           sendToUser(peerId, { type: 'NEW_ENCRYPTED_MESSAGE', senderName: me.display_name, message: savedMsg });
 
-          triggerPushToUser(peerId, {
+          await triggerPushToUser(peerId, {
             type: 'new-message',
             senderId: me.id,
             senderName: me.display_name,
@@ -919,5 +926,5 @@ server.on('upgrade', (req, socket) => {
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 NexusChat v13 Ultimate Sunucusu Çalışıyor -> Port: ${PORT}`);
+  console.log(`🚀 NexusChat v14 Ultimate Sunucusu Çalışıyor -> Port: ${PORT}`);
 });
