@@ -269,7 +269,7 @@ document.getElementById('loginForm').onsubmit = async (e) => {
 function updateMyAvatarUi() {
   const box = document.getElementById('myAvatarBox');
   if (!box || !me) return;
-  if (me.avatar_url) box.innerHTML = `<img src="${me.avatar_url}" alt="Profil" />`;
+  if (me.avatar_url) box.innerHTML = `<img src="${escapeHtml(me.avatar_url)}" alt="Profil" />`;
   else {
     box.textContent = (me.display_name || 'B')[0].toUpperCase();
     box.style.background = me.avatar_color || '#00a884';
@@ -509,7 +509,7 @@ function renderSidebar() {
       const div = document.createElement('div');
       div.className = 'contact-item' + (activePeer && activePeer.id === c.id ? ' active' : '');
       const statusBadge = c.isRegistered ? (c.online ? '🟢 Çevrimiçi' : '🔴 Çevrimdışı') : '⏳ Davet Et';
-      const avatarInner = c.avatarUrl ? `<img src="${c.avatarUrl}" />` : c.display_name[0].toUpperCase();
+      const avatarInner = c.avatarUrl ? `<img src="${escapeHtml(c.avatarUrl)}" />` : c.display_name[0].toUpperCase();
       div.innerHTML = `
         <div style="display:flex;align-items:center;gap:12px;min-width:0;">
           <div class="avatar" style="background:${c.avatarColor}">${avatarInner}<span class="dot ${c.online ? 'on' : 'off'}"></span></div>
@@ -532,7 +532,7 @@ function renderSidebar() {
       for (const u of discoverableUsers) {
         const div = document.createElement('div');
         div.className = 'contact-item';
-        const avatarInner = u.avatarUrl ? `<img src="${u.avatarUrl}" />` : u.display_name[0].toUpperCase();
+        const avatarInner = u.avatarUrl ? `<img src="${escapeHtml(u.avatarUrl)}" />` : u.display_name[0].toUpperCase();
         div.innerHTML = `
           <div style="display:flex;align-items:center;gap:10px;min-width:0;">
             <div class="avatar" style="background:${u.avatarColor}">${avatarInner}</div>
@@ -603,7 +603,7 @@ function renderSidebar() {
     for (const s of stories) {
       const card = document.createElement('div');
       card.style.cssText = `margin:10px 14px;border-radius:14px;overflow:hidden;border:1px solid var(--border);background:${s.bg_color || '#0f766e'};`;
-      const imgHtml = s.media_url ? `<img src="${s.media_url}" style="width:100%;max-height:220px;object-fit:cover;display:block;" />` : '';
+      const imgHtml = s.media_url ? `<img src="${escapeHtml(s.media_url)}" style="width:100%;max-height:220px;object-fit:cover;display:block;" />` : '';
       card.innerHTML = `
         ${imgHtml}
         <div style="padding:12px;background:rgba(11,20,26,0.72);">
@@ -626,7 +626,7 @@ function renderSidebar() {
 
   if (currentSideTab === 'settings') {
     const bigAvatar = me.avatar_url
-      ? `<img src="${me.avatar_url}" style="width:100%;height:100%;object-fit:cover;" />`
+      ? `<img src="${escapeHtml(me.avatar_url)}" style="width:100%;height:100%;object-fit:cover;" />`
       : (me.display_name || 'B')[0].toUpperCase();
 
     listEl.innerHTML = `
@@ -895,7 +895,7 @@ async function openChat(peer) {
 function updateChatHeader() {
   if (!activePeer) return;
   const pAv = document.getElementById('peerAvatarBox');
-  if (activePeer.avatarUrl) pAv.innerHTML = `<img src="${activePeer.avatarUrl}" />`;
+  if (activePeer.avatarUrl) pAv.innerHTML = `<img src="${escapeHtml(activePeer.avatarUrl)}" />`;
   else {
     pAv.textContent = (activePeer.display_name || 'K')[0].toUpperCase();
     pAv.style.background = activePeer.avatarColor || '#00a884';
@@ -1014,7 +1014,13 @@ document.getElementById('sendLocationOpt').onclick = () => {
 
 async function sendEncryptedEnvelope(msgType, payloadObj, ttlMs) {
   if (!activePeer) return;
-  const enc = await e2ee.encryptMessage(activePeer.id, activePeer.publicKeyJwk || '', payloadObj, activePeer.phone || '');
+  let enc;
+  try {
+    enc = await e2ee.encryptMessage(activePeer.id, activePeer.publicKeyJwk || '', payloadObj, activePeer.phone || '');
+  } catch (err) {
+    alert('🔒 ' + (err && err.message ? err.message : 'Mesaj şifrelenemedi.'));
+    return;
+  }
   const res = await api(`/api/messages/${activePeer.id}`, 'POST', {
     msgType,
     ciphertext: enc.ciphertext,

@@ -96,15 +96,15 @@ class NexusE2EE {
   async encryptMessage(peerId, peerPubJwkStr, payloadObj, peerPhone = '') {
     let sharedBits;
     let usedPubKey = peerPubJwkStr || '';
-    if (peerPubJwkStr) {
-      try {
-        sharedBits = await this._getSharedSecretBits(peerPubJwkStr);
-      } catch {
-        sharedBits = await this._getFallbackPairBits(peerPhone || peerId);
-        usedPubKey = '';
-      }
-    } else {
-      sharedBits = await this._getFallbackPairBits(peerPhone || peerId);
+    // Güvenlik: telefon numarasından türetilen zayıf yedek anahtar ile ŞİFRELEME YAPILMAZ.
+    // (Yedek anahtar sadece eski mesajları okuyabilmek için çözmede kullanılır.)
+    if (!peerPubJwkStr) {
+      throw new Error('Bu kişinin şifreleme anahtarı yok. Kişi NexusChat\'e kaydolup en az bir kez giriş yapınca mesaj gönderebilirsiniz.');
+    }
+    try {
+      sharedBits = await this._getSharedSecretBits(peerPubJwkStr);
+    } catch {
+      throw new Error('Kişinin şifreleme anahtarı geçersiz. Mesaj güvenli şekilde gönderilemedi.');
     }
 
     const msgNum = Date.now();

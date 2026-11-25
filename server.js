@@ -65,6 +65,64 @@ function sendToUser(userId, obj, options = {}) {
   }
 }
 
+// ---- Güvenlik yardımcıları ----
+const loginAttempts = new Map(); // phone -> { count, lockedUntil }
+const MAX_LOGIN_ATTEMPTS = 5;
+const LOGIN_LOCK_MS = 15 * 60 * 1000;
+const SESSION_DAYS = 30;
+const MAX_WS_FRAME = 8 * 1024 * 1024;
+
+function checkLoginLock(phone) {
+  const a = loginAttempts.get(phone);
+  if (a && a.lockedUntil > Date.now()) return Math.ceil((a.lockedUntil - Date.now()) / 60000);
+  return 0;
+}
+function registerLoginFail(phone) {
+  const a = loginAttempts.get(phone) || { count: 0, lockedUntil: 0 };
+  a.count += 1;
+  if (a.count >= MAX_LOGIN_ATTEMPTS) { a.lockedUntil = Date.now() + LOGIN_LOCK_MS; a.count = 0; }
+  loginAttempts.set(phone, a);
+}
+
+function sanitizeMediaUrl(v) {
+  const u = String(v || '').trim();
+  if (!u) return '';
+  if (/^data:image\/(png|jpe?g|webp|gif);base64,[A-Za-z0-9+/=]+$/.test(u)) return u;
+  if (/^\/blobs\/[A-Za-z0-9-]+\.bin$/.test(u)) return u;
+  if (/^https:\/\/[^\s"'<>]+$/.test(u)) return u;
+  return '';
+}
+function sanitizeColor(v, def) {
+  const c = String(v || '').trim();
+  return /^#[0-9a-fA-F]{3,8}$/.test(c) ? c : def;
+}
+
+// İki kullanıcı arasında rehber ilişkisi var mı? (herhangi bir yönde)
+async function areConnected(a, b) {
+  if (!a || !b) return false;
+  const r = await db.prepare(
+    'SELECT 1 FROM contacts WHERE (user_id = ? AND contact_user_id = ?) OR (user_id = ? AND contact_user_id = ?) LIMIT 1'
+  ).get(a, b, b, a);
+  return Boolean(r);
+}
+
+// Bu kullanıcıyla bu hedef arasında aktif bir arama var mı?
+function findCallBetween(userA, userB, callId) {
+  if (callId && activeCalls.has(callId)) {
+    const c = activeCalls.get(callId);
+    if ((c.callerId === userA && c.targetUserId === userB) || (c.callerId === userB && c.targetUserId === userA)) return c;
+    return null;
+  }
+  for (const c of activeCalls.values()) {
+    if ((c.callerId === userA && c.targetUserId === userB) || (c.callerId === userB && c.targetUserId === userA)) return c;
+  }
+  return null;
+}
+
+class HttpError extends Error {
+  constructor(status, message) { super(message); this.status = status; }
+}
+
 function isUserOnline(userId) {
   const set = onlineSockets.get(userId);
   return Boolean(set && set.size > 0);
@@ -76,8 +134,14 @@ async function broadcastPresence(userId, online) {
   } catch (e) {
     console.error('Presence hatası:', e.message);
   }
-  for (const set of onlineSockets.values()) {
-    for (const client of set) sendWs(client.socket, { type: 'PRESENCE', userId, online });
+  let related = [];
+  try {
+    related = await db.prepare(
+      'SELECT contact_user_id AS uid FROM contacts WHERE user_id = ? UNION SELECT user_id AS uid FROM contacts WHERE contact_user_id = ?'
+    ).all(userId, userId);
+  } catch {}
+  for (const r of related) {
+    sendToUser(r.uid, { type: 'PRESENCE', userId, online });
   }
 }
 
@@ -115,7 +179,7 @@ function readJsonBody(req, maxBytes = 25 * 1024 * 1024) {
     req.on('data', (c) => {
       total += c.length;
       if (total > maxBytes) {
-        reject(new Error('Dosya boyutu 25MB sınırını aşıyor.'));
+        reject(new HttpError(413, 'Dosya boyutu sınırı aşıldı.'));
         req.destroy();
         return;
       }
@@ -126,7 +190,7 @@ function readJsonBody(req, maxBytes = 25 * 1024 * 1024) {
         const raw = Buffer.concat(chunks).toString('utf8');
         resolve(raw ? JSON.parse(raw) : {});
       } catch {
-        reject(new Error('Geçersiz JSON verisi.'));
+        reject(new HttpError(400, 'Geçersiz JSON verisi.'));
       }
     });
     req.on('error', reject);
@@ -138,11 +202,14 @@ async function getAuthUser(req) {
   const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
   if (!token) return null;
   return await db.prepare(`
-    SELECT u.*, s.device_type as session_device_type FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?
+    SELECT u.*, s.device_type as session_device_type FROM sessions s JOIN users u ON u.id = s.user_id
+    WHERE s.token = ? AND s.created_at > to_char((now() - interval '30 days') AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')
   `).get(token) || null;
 }
 
 function getPublicUrl(req) {
+  const fixed = process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL;
+  if (fixed) return fixed.replace(/\/+$/, '');
   const host = req.headers.host || `localhost:${PORT}`;
   const proto = req.headers['x-forwarded-proto'] || (host.includes('localhost') ? 'http' : 'https');
   return `${proto}://${host}`;
@@ -262,7 +329,7 @@ const server = http.createServer(async (req, res) => {
 
       if (displayName.length < 2) return sendJson(res, 400, { error: 'Ad Soyad en az 2 karakter olmalıdır.' });
       if (normPhone.length < 7) return sendJson(res, 400, { error: 'Geçerli bir cep telefonu numarası girin.' });
-      if (password.length < 4) return sendJson(res, 400, { error: 'Şifre en az 4 karakter olmalıdır.' });
+      if (password.length < 8) return sendJson(res, 400, { error: 'Şifre en az 8 karakter olmalıdır.' });
 
       const existing = await db.prepare('SELECT * FROM users WHERE phone_normalized = ?').get(normPhone);
       if (existing && existing.is_registered === 1) {
@@ -306,11 +373,15 @@ const server = http.createServer(async (req, res) => {
       const publicKeyJwk = String(body.publicKeyJwk || '');
       const deviceType = body.deviceType === 'desktop' ? 'desktop' : 'mobile';
 
+      const lockMin = checkLoginLock(normPhone);
+      if (lockMin > 0) return sendJson(res, 429, { error: `Çok fazla hatalı deneme. ${lockMin} dakika sonra tekrar deneyin.` });
       const userRow = await db.prepare('SELECT * FROM users WHERE phone_normalized = ? AND is_registered = 1').get(normPhone);
       if (!userRow) return sendJson(res, 404, { error: 'Bu numaraya ait kayıtlı hesap bulunamadı. Önce Kayıt Olun.' });
       if (!verifyPassword(password, userRow.password_hash, userRow.password_salt)) {
+        registerLoginFail(normPhone);
         return sendJson(res, 401, { error: 'Hatalı şifre girdiniz!' });
       }
+      loginAttempts.delete(normPhone);
 
       if (publicKeyJwk && publicKeyJwk !== userRow.public_key_jwk) {
         const fp = generateFingerprint(publicKeyJwk);
@@ -379,9 +450,9 @@ const server = http.createServer(async (req, res) => {
 
       if (pathname === '/api/auth/profile' && req.method === 'PUT') {
         const body = await readJsonBody(req);
-        const displayName = String(body.displayName || me.display_name).trim();
-        const bio = String(body.bio ?? me.bio).trim();
-        const avatarUrl = body.avatarUrl !== undefined ? String(body.avatarUrl) : (me.avatar_url || '');
+        const displayName = String(body.displayName || me.display_name).trim().slice(0, 60);
+        const bio = String(body.bio ?? me.bio).trim().slice(0, 300);
+        const avatarUrl = body.avatarUrl !== undefined ? sanitizeMediaUrl(body.avatarUrl) : (me.avatar_url || '');
         await db.prepare('UPDATE users SET display_name = ?, bio = ?, avatar_url = ? WHERE id = ?').run(displayName, bio, avatarUrl, me.id);
         const updated = await db.prepare('SELECT id, display_name, phone, phone_normalized, public_key_jwk, key_fingerprint, avatar_color, avatar_url, bio FROM users WHERE id = ?').get(me.id);
         return sendJson(res, 200, { user: updated });
@@ -545,7 +616,8 @@ const server = http.createServer(async (req, res) => {
           };
         });
 
-        const allRegistered = await db.prepare('SELECT id, display_name, phone, avatar_color, avatar_url, bio FROM users WHERE is_registered = 1').all();
+        // Gizlilik: Tüm kullanıcı listesi artık paylaşılmıyor
+        const allRegistered = [];
         const discoverable = allRegistered
           .filter((u) => !savedIds.has(u.id))
           .map((u) => ({
@@ -567,6 +639,12 @@ const server = http.createServer(async (req, res) => {
         const callId = String(body.callId || ('call_' + crypto.randomBytes(6).toString('hex')));
         const targetUserId = String(body.targetUserId || '');
         const callType = body.callType === 'video' ? 'video' : 'audio';
+        if (!targetUserId || !(await areConnected(me.id, targetUserId))) {
+          return sendJson(res, 403, { error: 'Bu kişiyi arama yetkiniz yok. Önce rehbere ekleyin.' });
+        }
+        if (activeCalls.has(callId) && activeCalls.get(callId).callerId !== me.id) {
+          return sendJson(res, 409, { error: 'Geçersiz çağrı kimliği.' });
+        }
 
         const callObj = {
           callId,
@@ -615,7 +693,10 @@ const server = http.createServer(async (req, res) => {
 
       if (pathname === '/api/calls/active' && req.method === 'GET') {
         const callId = parsedUrl.searchParams.get('callId');
-        if (callId && activeCalls.has(callId)) return sendJson(res, 200, { call: activeCalls.get(callId) });
+        if (callId && activeCalls.has(callId)) {
+          const c = activeCalls.get(callId);
+          if (c.callerId === me.id || c.targetUserId === me.id) return sendJson(res, 200, { call: c });
+        }
         for (const call of activeCalls.values()) {
           if (call.targetUserId === me.id && call.status === 'ringing') return sendJson(res, 200, { call });
         }
@@ -644,8 +725,19 @@ const server = http.createServer(async (req, res) => {
         const calleeId = String(body.calleeId || '');
         const callType = body.callType === 'video' ? 'video' : 'audio';
         const status = ['missed', 'completed', 'rejected'].includes(body.status) ? body.status : 'missed';
-        const durationSec = Number(body.durationSec || 0);
+        const durationSec = Math.max(0, Math.min(86400, Math.floor(Number(body.durationSec) || 0)));
 
+        if (callerId !== me.id && calleeId !== me.id) {
+          return sendJson(res, 403, { error: 'Bu arama kaydını oluşturma yetkiniz yok.' });
+        }
+        const otherId = callerId === me.id ? calleeId : callerId;
+        if (otherId && !(await areConnected(me.id, otherId))) {
+          return sendJson(res, 403, { error: 'Bu arama kaydını oluşturma yetkiniz yok.' });
+        }
+        const existingLog = await db.prepare('SELECT caller_id, callee_id FROM call_logs WHERE id = ?').get(callId);
+        if (existingLog && existingLog.caller_id !== me.id && existingLog.callee_id !== me.id) {
+          return sendJson(res, 403, { error: 'Bu arama kaydını değiştirme yetkiniz yok.' });
+        }
         if (calleeId) {
           await db.prepare(`
             INSERT INTO call_logs (id, caller_id, callee_id, call_type, status, duration_sec)
@@ -685,8 +777,8 @@ const server = http.createServer(async (req, res) => {
       if (pathname === '/api/stories' && req.method === 'POST') {
         const body = await readJsonBody(req, 15 * 1024 * 1024);
         const caption = String(body.caption || '').trim();
-        const mediaUrl = String(body.mediaUrl || '');
-        const bgColor = String(body.bgColor || '#0f766e');
+        const mediaUrl = sanitizeMediaUrl(body.mediaUrl);
+        const bgColor = sanitizeColor(body.bgColor, '#0f766e');
         if (!caption && !mediaUrl) return sendJson(res, 400, { error: 'Durum metni veya fotoğrafı seçin.' });
 
         const storyId = 'st_' + crypto.randomBytes(6).toString('hex');
@@ -700,6 +792,8 @@ const server = http.createServer(async (req, res) => {
 
       const storyViewMatch = pathname.match(/^\/api\/stories\/([^/]+)\/view$/);
       if (storyViewMatch && req.method === 'POST') {
+        const st = await db.prepare('SELECT id FROM stories WHERE id = ?').get(storyViewMatch[1]);
+        if (!st) return sendJson(res, 404, { error: 'Durum bulunamadı.' });
         await db.prepare('INSERT INTO story_views (story_id, viewer_id) VALUES (?, ?) ON CONFLICT DO NOTHING').run(storyViewMatch[1], me.id);
         return sendJson(res, 200, { ok: true });
       }
@@ -707,6 +801,8 @@ const server = http.createServer(async (req, res) => {
       const msgMatch = pathname.match(/^\/api\/messages\/([^/]+)$/);
       if (msgMatch) {
         const peerId = msgMatch[1];
+        const peerExists = await db.prepare('SELECT id FROM users WHERE id = ?').get(peerId);
+        if (!peerExists) return sendJson(res, 404, { error: 'Kişi bulunamadı.' });
 
         if (req.method === 'GET') {
           const peerInfo = await db.prepare('SELECT phone_normalized FROM users WHERE id = ?').get(peerId);
@@ -732,6 +828,7 @@ const server = http.createServer(async (req, res) => {
           const msgType = String(body.msgType || 'text');
           const ciphertext = String(body.ciphertext || '');
           const iv = String(body.iv || '');
+          if (!ciphertext || !iv) return sendJson(res, 400, { error: 'Boş şifreli mesaj.' });
           const msgNum = Number(body.msgNum || 0);
           const ttlMs = Number(body.ttlMs || 0);
           const senderPub = String(body.senderPublicKeyJwk || me.public_key_jwk || '');
@@ -783,7 +880,12 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(404);
     res.end('Not Found');
   } catch (err) {
-    sendJson(res, 500, { error: err.message || 'Sunucu hatası' });
+    if (err && err.status) {
+      if (!res.headersSent) sendJson(res, err.status, { error: err.message });
+      return;
+    }
+    console.error('Sunucu hatası:', err);
+    if (!res.headersSent) sendJson(res, 500, { error: 'Sunucu hatası. Lütfen tekrar deneyin.' });
   }
 });
 
@@ -840,6 +942,7 @@ server.on('upgrade', async (req, socket) => {
         offset = 10;
       }
 
+      if (len > MAX_WS_FRAME) { socket.destroy(); return; }
       const maskLen = masked ? 4 : 0;
       if (buffer.length < offset + maskLen + len) return;
 
@@ -865,6 +968,28 @@ server.on('upgrade', async (req, socket) => {
           } else if (msg.type === 'VISIBILITY') {
             clientEntry.isForeground = Boolean(msg.visible);
           } else if (['CALL_OFFER', 'CALL_ANSWER', 'ICE_CANDIDATE', 'CALL_REJECT', 'CALL_END', 'CALL_MISSED', 'CALL_MEDIA'].includes(msg.type)) {
+            handleSignal(msg);
+          }
+        } catch {}
+      }
+    }
+  });
+
+  // Arama sinyallerini yetki kontrolüyle işler
+  async function handleSignal(msg) {
+    try {
+            const targetId = String(msg.targetUserId || '');
+            if (!targetId || targetId === me.id) return;
+            if (msg.type === 'CALL_OFFER') {
+              if (!(await areConnected(me.id, targetId))) {
+                sendWs(socket, { type: 'CALL_ERROR', callId: msg.callId, error: 'Bu kişiyi arama yetkiniz yok. Önce rehbere ekleyin.' });
+                return;
+              }
+              if (msg.callId && activeCalls.has(msg.callId) && activeCalls.get(msg.callId).callerId !== me.id) return;
+            } else {
+              // Diğer tüm sinyaller sadece iki taraf arasında aktif bir arama varsa iletilir
+              if (!findCallBetween(me.id, targetId, msg.callId)) return;
+            }
             const callId = msg.callId || ('call_' + crypto.randomBytes(6).toString('hex'));
             const packet = { ...msg, callId, fromUserId: me.id, fromDisplayName: me.display_name };
 
@@ -896,9 +1021,10 @@ server.on('upgrade', async (req, socket) => {
                 title: `📞 GELEN ARAMA: ${me.display_name}`,
                 body: msg.callType === 'video' ? '📹 Görüntülü Arama Geliyor — Yanıtlamak için dokunun' : '📞 Sesli Arama Geliyor — Yanıtlamak için dokunun'
               });
-              continue;
+              return;
             } else if (msg.type === 'CALL_ANSWER') {
-              if (activeCalls.has(callId)) activeCalls.get(callId).status = 'answered';
+              const ac = findCallBetween(me.id, targetId, callId);
+              if (ac && ac.targetUserId === me.id) ac.status = 'answered';
             } else if (msg.type === 'CALL_MISSED') {
               activeCalls.delete(callId);
               if (msg.targetUserId) {
@@ -916,21 +1042,19 @@ server.on('upgrade', async (req, socket) => {
                   body: `${me.display_name} sizi aradı (${msg.callType === 'video' ? 'Görüntülü' : 'Sesli'})`
                 });
               }
-              continue;
+              return;
             } else if (msg.type === 'ICE_CANDIDATE' && msg.candidate) {
-              for (const c of activeCalls.values()) {
-                if (c.callerId === me.id) c.iceCandidates.push(msg.candidate);
-              }
+              const c = findCallBetween(me.id, targetId, msg.callId);
+              if (c && c.callerId === me.id && c.iceCandidates.length < 100) c.iceCandidates.push(msg.candidate);
             } else if (msg.type === 'CALL_REJECT' || msg.type === 'CALL_END') {
               activeCalls.delete(callId);
             }
 
-            if (msg.targetUserId) sendToUser(msg.targetUserId, packet);
-          }
-        } catch {}
-      }
+            sendToUser(targetId, packet);
+    } catch (e) {
+      console.error('Sinyal hatası:', e.message);
     }
-  });
+  }
 
   const cleanup = () => {
     const set = onlineSockets.get(me.id);
