@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: nexuschat-e2ee
+    runtime: node
+    plan: free
+    region: frankfurt
+    buildCommand: "npm install"
+    startCommand: "node server.js"
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: NODE_VERSION
+        value: "22.13.0"
+      - key: DATABASE_URL
+        sync: false   # Değeri Render panelinde elle girin (Neon bağlantı adresi). GitHub'a YAZMAYIN!
