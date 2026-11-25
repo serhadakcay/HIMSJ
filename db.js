@@ -158,6 +158,7 @@ async function initDb() {
     value TEXT NOT NULL
   );
   `);
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS key_backup TEXT DEFAULT ''`);
   console.log('✅ PostgreSQL tabloları hazır.');
 }
 

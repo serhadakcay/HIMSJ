@@ -358,6 +358,9 @@ const server = http.createServer(async (req, res) => {
         `).run(userId, displayName, displayPhone, normPhone, hash, salt, publicKeyJwk, fingerprint, color);
       }
 
+      const keyBackup = String(body.keyBackup || '').slice(0, 20000);
+      if (keyBackup) await db.prepare('UPDATE users SET key_backup = ? WHERE id = ?').run(keyBackup, userId);
+
       await integratePhoneContacts(userId, normPhone, displayName, displayPhone);
 
       const token = crypto.randomBytes(32).toString('hex');
@@ -383,7 +386,7 @@ const server = http.createServer(async (req, res) => {
       }
       loginAttempts.delete(normPhone);
 
-      if (publicKeyJwk && publicKeyJwk !== userRow.public_key_jwk) {
+      if (publicKeyJwk && publicKeyJwk !== userRow.public_key_jwk && !userRow.key_backup) {
         const fp = generateFingerprint(publicKeyJwk);
         await db.prepare('UPDATE users SET public_key_jwk = ?, key_fingerprint = ? WHERE id = ?').run(publicKeyJwk, fp, userRow.id);
         userRow.public_key_jwk = publicKeyJwk;
@@ -404,7 +407,8 @@ const server = http.createServer(async (req, res) => {
           key_fingerprint: userRow.key_fingerprint,
           avatar_color: userRow.avatar_color,
           avatar_url: userRow.avatar_url || '',
-          bio: userRow.bio || ''
+          bio: userRow.bio || '',
+          key_backup: userRow.key_backup || ''
         }
       });
     }
@@ -441,9 +445,29 @@ const server = http.createServer(async (req, res) => {
       if (pathname === '/api/auth/keys' && req.method === 'PUT') {
         const body = await readJsonBody(req);
         const pub = String(body.publicKeyJwk || '');
+        const keyBackup = String(body.keyBackup || '').slice(0, 20000);
+        const current = await db.prepare('SELECT key_backup FROM users WHERE id = ?').get(me.id);
+        let backupPub = '';
+        if (current && current.key_backup) {
+          try {
+            const bp = JSON.parse(current.key_backup).pub;
+            if (bp) backupPub = `${bp.x}:${bp.y}`;
+          } catch {}
+        }
         if (pub) {
+          let newPub = '';
+          try { const j = JSON.parse(pub); newPub = `${j.x}:${j.y}`; } catch {}
+          if (!newPub) return sendJson(res, 400, { error: 'Geçersiz anahtar.' });
+          // Hesabın anahtar yedeği varsa, tüm cihazlar aynı anahtarı kullanmak zorunda
+          if (backupPub && newPub !== backupPub) {
+            return sendJson(res, 409, { error: 'Anahtar yedeği farklı. Bu cihazda çıkış yapıp şifrenizle tekrar giriş yapın.' });
+          }
           const fp = generateFingerprint(pub);
           await db.prepare('UPDATE users SET public_key_jwk = ?, key_fingerprint = ? WHERE id = ?').run(pub, fp, me.id);
+        }
+        // Yedek sadece hiç yoksa kaydedilir (başka bir cihazın yedeğinin üzerine yazılmaz)
+        if (keyBackup && !backupPub) {
+          await db.prepare('UPDATE users SET key_backup = ? WHERE id = ?').run(keyBackup, me.id);
         }
         return sendJson(res, 200, { ok: true });
       }

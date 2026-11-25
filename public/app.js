@@ -231,8 +231,11 @@ document.getElementById('regForm').onsubmit = async (e) => {
     const phone = document.getElementById('regPhone').value.trim();
     const password = document.getElementById('regPass').value;
     const norm = phone.replace(/\D/g, '');
+    if (password.length < 8) { alert('Şifre en az 8 karakter olmalıdır.'); return; }
     const pubJwkStr = await e2ee.initForUser(norm);
-    const data = await api('/api/auth/register', 'POST', { displayName, phone, password, publicKeyJwk: pubJwkStr, deviceType });
+    const keyBackup = await e2ee.createKeyBackup(password);
+    const data = await api('/api/auth/register', 'POST', { displayName, phone, password, publicKeyJwk: pubJwkStr, keyBackup, deviceType });
+    if (keyBackup) e2ee.clearPendingBackup();
     token = data.token;
     localStorage.setItem('nexus_token', token);
     me = data.user;
@@ -247,11 +250,26 @@ document.getElementById('loginForm').onsubmit = async (e) => {
     const phone = document.getElementById('loginPhone').value.trim();
     const password = document.getElementById('loginPass').value;
     const norm = phone.replace(/\D/g, '');
-    const pubJwkStr = await e2ee.initForUser(norm);
-    const data = await api('/api/auth/login', 'POST', { phone, password, publicKeyJwk: pubJwkStr, deviceType });
+    await e2ee.initForUser(norm);
+    const data = await api('/api/auth/login', 'POST', { phone, password, deviceType });
     token = data.token;
     localStorage.setItem('nexus_token', token);
     me = data.user;
+
+    // Çoklu cihaz: hesabın anahtar yedeği varsa bu cihaza geri yükle (tüm cihazlar aynı anahtarı kullanır)
+    if (me.key_backup) {
+      try {
+        await e2ee.restoreFromBackup(me.key_backup, password);
+      } catch {
+        alert('⚠️ Anahtar yedeği çözülemedi. Bu cihazda yeni mesajlar okunamayabilir.');
+      }
+    } else if (e2ee.hasPendingBackup() || e2ee.publicKeyJwkStr) {
+      const keyBackup = await e2ee.createKeyBackup(password);
+      await api('/api/auth/keys', 'PUT', { publicKeyJwk: e2ee.publicKeyJwkStr, keyBackup }).catch(() => {});
+      if (keyBackup) e2ee.clearPendingBackup();
+      me.public_key_jwk = e2ee.publicKeyJwkStr;
+    }
+    delete me.key_backup;
     startApp();
   } catch (err) { alert(err.message); }
 };
@@ -295,8 +313,12 @@ async function startApp() {
 
   
   if (e2ee.publicKeyJwkStr && me && me.public_key_jwk !== e2ee.publicKeyJwkStr) {
-    await api('/api/auth/keys', 'PUT', { publicKeyJwk: e2ee.publicKeyJwkStr }).catch(() => {});
-    me.public_key_jwk = e2ee.publicKeyJwkStr;
+    try {
+      await api('/api/auth/keys', 'PUT', { publicKeyJwk: e2ee.publicKeyJwkStr });
+      me.public_key_jwk = e2ee.publicKeyJwkStr;
+    } catch (err) {
+      alert('🔐 ' + (err && err.message ? err.message : 'Şifreleme anahtarı eşitlenemedi.'));
+    }
   }
 
   connectWebSocket();
@@ -876,6 +898,7 @@ async function openChat(peer) {
     if (refreshed) peer = refreshed;
   }
   activePeer = peer;
+  checkPeerKeyChange(peer);
   document.getElementById('appScreen').classList.add('mobile-chat');
   document.getElementById('chatHeaderActions').classList.remove('hidden');
   document.getElementById('peerAvatarBox').classList.remove('hidden');
@@ -1612,3 +1635,34 @@ function escapeHtml(s) {
   d.textContent = s || '';
   return d.innerHTML;
 }
+
+
+// ---- Güvenlik numarası ve anahtar değişikliği uyarısı ----
+function checkPeerKeyChange(peer) {
+  if (!peer || !peer.publicKeyJwk || !me) return;
+  let fp = '';
+  try { const j = JSON.parse(peer.publicKeyJwk); fp = `${j.x}:${j.y}`; } catch { return; }
+  const k = `nexus_seen_peer_key_${me.id}_${peer.id}`;
+  const prev = localStorage.getItem(k);
+  if (prev && prev !== fp) {
+    alert(`⚠️ ${peer.display_name} kişisinin güvenlik numarası değişti.\n\nKişi yeni bir cihaz kurmuş olabilir. Emin olmak için sohbet başlığında kişinin adına dokunup güvenlik numarasını karşılaştırın.`);
+  }
+  localStorage.setItem(k, fp);
+}
+
+(() => {
+  const nameEl = document.getElementById('peerNameLabel');
+  if (!nameEl) return;
+  nameEl.style.cursor = 'pointer';
+  nameEl.title = 'Güvenlik numarasını göster';
+  nameEl.onclick = async () => {
+    if (!activePeer) return;
+    if (!activePeer.publicKeyJwk) { alert('Bu kişinin şifreleme anahtarı yok.'); return; }
+    try {
+      const sn = await e2ee.computeSafetyNumber(activePeer.publicKeyJwk);
+      alert(`🔐 Güvenlik Numarası — ${activePeer.display_name}\n\n${sn}\n\nBu numara iki telefonda da AYNI olmalı. Yüz yüze veya telefonda karşılaştırın; aynıysa mesajlarınızı aranızda kimse okuyamaz.`);
+    } catch {
+      alert('Güvenlik numarası hesaplanamadı.');
+    }
+  };
+})();
