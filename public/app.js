@@ -868,7 +868,35 @@ async function processPickedContacts(picked) {
   });
 }
 
+
+// ---- Android uygulaması (APK) içindeyse telefonun kendi rehber seçicisi kullanılır ----
+function hasNativePicker() {
+  return Boolean(window.AndroidNative && typeof window.AndroidNative.pickContact === 'function');
+}
+function nativePickContact() {
+  return new Promise((resolve, reject) => {
+    window.onNativeContactPicked = (json, err) => {
+      window.onNativeContactPicked = null;
+      if (err) { reject(new Error(err)); return; }
+      if (!json) { resolve([]); return; }
+      try {
+        const o = JSON.parse(json);
+        resolve([{ name: [o.name || ''], tel: Array.isArray(o.tels) ? o.tels : [] }]);
+      } catch (e) { reject(e); }
+    };
+    window.AndroidNative.pickContact();
+  });
+}
 document.getElementById('pickFromPhoneBtn').onclick = async () => {
+  if (hasNativePicker()) {
+    try {
+      const picked = await nativePickContact();
+      if (picked.length) await processPickedContacts(picked);
+    } catch (err) {
+      alert(err && err.message ? err.message : 'Rehber açılamadı.');
+    }
+    return;
+  }
   if (!window.isSecureContext) return alert('Telefon rehberine erişmek için sayfanın HTTPS adresinden açılması gerekir.');
   if (!(navigator.contacts && typeof navigator.contacts.select === 'function')) {
     alert('Bu cihaz doğrudan rehber penceresini desteklemiyor. "iPhone / .vcf Yükle" veya numara kutusunu kullanın.');
@@ -1128,6 +1156,24 @@ document.getElementById('sendContactCardOpt').onclick = () => {
 };
 
 document.getElementById('shareFromDevicePhoneBtn').onclick = () => {
+  if (hasNativePicker()) {
+    nativePickContact().then(async (picked) => {
+      if (!picked.length) return;
+      const contactName = extractAllStringsDeep(picked[0].name)[0] || 'Kişi';
+      const uniqueTels = [...new Set(extractAllStringsDeep(picked[0].tel).filter(Boolean))];
+      document.getElementById('shareContactModal').classList.add('hidden');
+      if (uniqueTels.length === 0) return alert('Seçilen kişide telefon numarası bulunamadı.');
+      if (uniqueTels.length > 1) {
+        showChoosePhoneModal(contactName, uniqueTels, async (chosen) => {
+          const phoneToSend = chosen === '__ALL__' ? uniqueTels.join(', ') : chosen;
+          await sendEncryptedEnvelope('contact', { kind: 'contact', contactName, contactPhone: phoneToSend }, 0);
+        });
+      } else {
+        await sendEncryptedEnvelope('contact', { kind: 'contact', contactName, contactPhone: uniqueTels[0] }, 0);
+      }
+    }).catch((err) => alert(err && err.message ? err.message : 'Rehber açılamadı.'));
+    return;
+  }
   if (!navigator.contacts || typeof navigator.contacts.select !== 'function') {
     return alert('Bu tarayıcı doğrudan rehber erişimini desteklemiyor. Aşağıdaki listeden kişi seçebilirsiniz.');
   }
