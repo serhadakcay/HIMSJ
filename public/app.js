@@ -286,14 +286,32 @@ document.getElementById('loginForm').onsubmit = async (e) => {
   } catch (err) { alert(err.message); }
 };
 
+// Kayıtlı oturum varsa giriş ekranını hiç gösterme; bağlanırken bekleme yazısı göster
+if (token && !new URLSearchParams(location.search).get('davet')) {
+  document.getElementById('authScreen').classList.add('hidden');
+  const splash = document.createElement('div');
+  splash.id = 'bootSplash';
+  splash.style.cssText = 'position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;background:#111b21;color:#aebac1;font-size:15px;z-index:9999;';
+  splash.innerHTML = '<div style="font-size:42px;">🔒</div><div>NexusChat açılıyor…</div><div style="font-size:12px;opacity:.7;">Sunucu uyuyorsa 30-60 saniye sürebilir</div>';
+  document.body.appendChild(splash);
+}
+function hideBootSplash() { document.getElementById('bootSplash')?.remove(); }
+
 (async () => {
   if (!token) return;
   try {
     const data = await api('/api/auth/me');
     me = data.user;
     await e2ee.initForUser(clientNormPhone(me.phone_normalized));
+    hideBootSplash();
     startApp();
-  } catch { localStorage.removeItem('nexus_token'); }
+  } catch (err) {
+    hideBootSplash();
+    // Sadece oturum gerçekten geçersizse çıkış yap; internet/sunucu hatasında oturumu koru
+    if (err && /Oturum/.test(err.message || '')) localStorage.removeItem('nexus_token');
+    document.getElementById('authScreen').classList.remove('hidden');
+    if (err && !/Oturum/.test(err.message || '')) alert('Sunucuya bağlanılamadı. İnternet bağlantınızı kontrol edip uygulamayı yeniden açın.');
+  }
 })();
 
 function updateMyAvatarUi() {
@@ -694,7 +712,8 @@ function renderSidebar() {
           <h4>🎨 Görünüm & Yazı Ayarları</h4>
           <button type="button" class="btn-sec" id="openAppFromSettingsBtn" style="margin-top:6px;margin-bottom:0;">🖼️ Arkaplan Fotoğrafı & Yazı Tipi/Boyutu</button>
         </div>
-        <button type="button" class="btn-sm btn-sec" id="settingsChangePwBtn" style="margin-bottom:8px;">🔑 Şifre Değiştir</button>
+        <button type="button" class="btn-sm btn-sec" id="settingsPushTestBtn" style="margin-bottom:8px;">🔔 Bildirimleri Test Et</button>
+            <button type="button" class="btn-sm btn-sec" id="settingsChangePwBtn" style="margin-bottom:8px;">🔑 Şifre Değiştir</button>
             <button type="button" class="btn-red" id="settingsLogoutBtn">🚪 Oturumu Kapat</button>
             <button type="button" class="btn-red" id="settingsDeleteAccountBtn" style="margin-top:8px;opacity:.85;">🗑️ Hesabımı Kalıcı Olarak Sil</button>
       </div>
@@ -710,6 +729,41 @@ function renderSidebar() {
       alert('✅ Profil bilgileriniz güncellendi!');
     };
     listEl.querySelector('#openAppFromSettingsBtn').onclick = () => document.getElementById('appearanceModal').classList.remove('hidden');
+    listEl.querySelector('#settingsPushTestBtn').onclick = async () => {
+      const lines = [];
+      const N = window.AndroidNative;
+      if (!N || typeof N.getFcmToken !== 'function') {
+        alert('Bu test sadece NexusChat Android uygulamasında çalışır.');
+        return;
+      }
+      let diag = {};
+      try { diag = JSON.parse(N.getPushDiagnostics ? N.getPushDiagnostics() : '{}'); } catch {}
+      const tok = N.getFcmToken();
+      if (tok) { try { await api('/api/push/fcm-register', 'POST', { token: tok }); } catch {} }
+      let st = {};
+      try { st = await api('/api/push/status'); } catch {}
+      const ok = (v) => (v ? '✅' : '❌');
+      if ('notificationsEnabled' in diag) lines.push(`${ok(diag.notificationsEnabled)} Bildirim izni`);
+      if ('callChannelEnabled' in diag) lines.push(`${ok(diag.callChannelEnabled)} "Gelen aramalar" bildirim kanalı`);
+      if ('canFullScreen' in diag) lines.push(`${ok(diag.canFullScreen)} Kilit ekranında arama ekranı (tam ekran bildirim izni)`);
+      if ('ignoringBattery' in diag) lines.push(`${ok(diag.ignoringBattery)} Pil kısıtlaması yok`);
+      lines.push(`${ok(Boolean(tok))} Cihaz bildirim anahtarı (Firebase)`);
+      lines.push(`${ok(st.fcmEnabled)} Sunucuda Firebase açık`);
+      lines.push(`${ok(st.tokenCount > 0)} Bu hesaba kayıtlı cihaz: ${st.tokenCount || 0}`);
+      let sent = null;
+      try { sent = await api('/api/push/test', 'POST', { kind: 'message' }); } catch {}
+      const delivered = sent && sent.results && sent.results.some((r) => r.ok);
+      lines.push(`${ok(delivered)} Deneme bildirimi Firebase'e gönderildi${sent && sent.results && sent.results.length ? ' (kod: ' + sent.results.map((r) => r.status).join(', ') + ')' : ''}`);
+      const bad = [];
+      if (diag.notificationsEnabled === false || diag.callChannelEnabled === false) bad.push('notif');
+      if (diag.canFullScreen === false) bad.push('fullscreen');
+      if (diag.ignoringBattery === false) bad.push('battery');
+      let msg = '🔔 Bildirim Testi\n\n' + lines.join('\n');
+      msg += delivered ? '\n\nBirkaç saniye içinde "Deneme bildirimi" gelmeli.' : '\n\nDeneme bildirimi gönderilemedi.';
+      if (bad.length) msg += '\n\n❌ işaretli ayarları açmak için TAMAM\'a bastıktan sonra açılacak ekranlarda izin verin.';
+      alert(msg);
+      if (N.openPushSettings) { for (const b of bad) { try { N.openPushSettings(b); } catch {} break; } }
+    };
     listEl.querySelector('#settingsChangePwBtn').onclick = async () => {
       const oldPw = prompt('Mevcut şifreniz:');
       if (!oldPw) return;

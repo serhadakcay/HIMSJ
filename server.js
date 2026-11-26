@@ -16,6 +16,7 @@ const {
   initDb
 } = require('./db');
 const { ensureVapidKeysDb, sendWebPush } = require('./push-utils');
+const { isFcmEnabled, sendFcm } = require('./fcm');
 
 process.on('unhandledRejection', (err) => console.error('Yakalanmamış hata:', err && err.message ? err.message : err));
 
@@ -165,7 +166,21 @@ async function broadcastPresence(userId, online) {
 }
 
 async function triggerPushToUser(userId, payloadObj) {
-  if (!vapidKeys || !userId) return;
+  if (!userId) return;
+  // 1) Android uygulaması (Firebase): uygulama kapalıyken de bildirim / arama ekranı
+  if (isFcmEnabled()) {
+    try {
+      const toks = await db.prepare('SELECT token FROM fcm_tokens WHERE user_id = ?').all(userId);
+      for (const t of toks) {
+        const r = await sendFcm(t.token, payloadObj);
+        if (r.invalid) await db.prepare('DELETE FROM fcm_tokens WHERE token = ?').run(t.token);
+      }
+    } catch (e) {
+      console.error('FCM hatası:', e.message);
+    }
+  }
+  // 2) Tarayıcı (Web Push)
+  if (!vapidKeys) return;
   try {
   const subs = await db.prepare('SELECT endpoint, device_type, p256dh, auth FROM push_subscriptions WHERE user_id = ?').all(userId);
   for (const s of subs) {
@@ -657,6 +672,50 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 200, { ok: true });
       }
 
+      // Android uygulamasının Firebase cihaz anahtarını kaydet
+      if (pathname === '/api/push/fcm-register' && req.method === 'POST') {
+        const body = await readJsonBody(req);
+        const t = String(body.token || '').trim();
+        if (!/^[A-Za-z0-9_:\-]{20,4096}$/.test(t)) return sendJson(res, 400, { error: 'Geçersiz cihaz anahtarı.' });
+        await db.prepare(`
+          INSERT INTO fcm_tokens (token, user_id, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
+          ON CONFLICT (token) DO UPDATE SET user_id = excluded.user_id, updated_at = CURRENT_TIMESTAMP
+        `).run(t, me.id);
+        return sendJson(res, 200, { ok: true, fcm: isFcmEnabled() });
+      }
+
+      // Bildirim teşhisi: Firebase açık mı, bu hesaba kayıtlı kaç cihaz var
+      if (pathname === '/api/push/status' && req.method === 'GET') {
+        const n = await db.prepare('SELECT COUNT(*) AS n FROM fcm_tokens WHERE user_id = ?').get(me.id);
+        return sendJson(res, 200, { fcmEnabled: isFcmEnabled(), tokenCount: Number((n && n.n) || 0) });
+      }
+
+      // Kendine deneme bildirimi gönder (mesaj veya arama)
+      if (pathname === '/api/push/test' && req.method === 'POST') {
+        const body = await readJsonBody(req);
+        const kind = body.kind === 'call' ? 'call' : 'message';
+        const toks = await db.prepare('SELECT token FROM fcm_tokens WHERE user_id = ?').all(me.id);
+        const results = [];
+        if (isFcmEnabled()) {
+          for (const t of toks) {
+            const payload = kind === 'call'
+              ? { type: 'incoming-call', callId: 'test_' + crypto.randomBytes(4).toString('hex'), callerId: me.id, callerName: 'Deneme Araması', callType: 'audio' }
+              : { type: 'new-message', senderId: me.id, title: '🔔 Deneme bildirimi', body: 'Bildirimler çalışıyor!' };
+            const r = await sendFcm(t.token, payload);
+            if (r.invalid) await db.prepare('DELETE FROM fcm_tokens WHERE token = ?').run(t.token);
+            results.push({ ok: r.ok, status: r.status, invalid: Boolean(r.invalid) });
+          }
+        }
+        return sendJson(res, 200, { fcmEnabled: isFcmEnabled(), tokenCount: toks.length, results });
+      }
+
+      if (pathname === '/api/push/fcm-unregister' && req.method === 'POST') {
+        const body = await readJsonBody(req);
+        const t = String(body.token || '').trim();
+        if (t) await db.prepare('DELETE FROM fcm_tokens WHERE token = ? AND user_id = ?').run(t, me.id);
+        return sendJson(res, 200, { ok: true });
+      }
+
       if (pathname === '/api/push/unsubscribe' && req.method === 'POST') {
         const body = await readJsonBody(req);
         if (body.endpoint) await db.prepare('DELETE FROM push_subscriptions WHERE endpoint = ?').run(body.endpoint);
@@ -849,6 +908,21 @@ const server = http.createServer(async (req, res) => {
           });
         }
         return sendJson(res, 201, { ok: true, callId });
+      }
+
+      // Bildirimdeki "Reddet" butonu (uygulama kapalıyken) için
+      if (pathname === '/api/calls/reject' && req.method === 'POST') {
+        const body = await readJsonBody(req);
+        const callId = String(body.callId || '');
+        const call = activeCalls.get(callId);
+        if (!call || call.targetUserId !== me.id) return sendJson(res, 404, { error: 'Aktif çağrı yok.' });
+        activeCalls.delete(callId);
+        sendToUser(call.callerId, { type: 'CALL_REJECT', callId, fromUserId: me.id, fromDisplayName: me.display_name, targetUserId: call.callerId });
+        await db.prepare(`
+          INSERT INTO call_logs (id, caller_id, callee_id, call_type, status, duration_sec)
+          VALUES (?, ?, ?, ?, 'rejected', 0) ON CONFLICT (id) DO NOTHING
+        `).run(callId, call.callerId, me.id, call.callType || 'audio');
+        return sendJson(res, 200, { ok: true });
       }
 
       if (pathname === '/api/calls/poll' && req.method === 'GET') {
@@ -1223,6 +1297,8 @@ server.on('upgrade', async (req, socket) => {
               if (c && c.callerId === me.id && c.iceCandidates.length < 100) c.iceCandidates.push(msg.candidate);
             } else if (msg.type === 'CALL_REJECT' || msg.type === 'CALL_END') {
               activeCalls.delete(callId);
+              // Karşı tarafın telefonunda hâlâ çalan arama bildirimi varsa kapat
+              triggerPushToUser(targetId, { type: 'call-cancel', callId });
             }
 
             sendToUser(targetId, packet);
@@ -1255,5 +1331,6 @@ server.on('upgrade', async (req, socket) => {
   }
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 NexusChat v14 Ultimate Sunucusu Çalışıyor (PostgreSQL) -> Port: ${PORT}`);
+    console.log(isFcmEnabled() ? '🔔 Firebase bildirimleri AKTİF' : '⚠️ Firebase bildirimleri KAPALI (FIREBASE_SERVICE_ACCOUNT tanımlı değil)');
   });
 })();
