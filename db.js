@@ -171,6 +171,13 @@ async function initDb() {
     )
   `);
   await pool.query(`DELETE FROM invites WHERE expires_at < ${NOW_TXT}`);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS fcm_tokens (
+      token TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      updated_at TEXT DEFAULT (${NOW_TXT})
+    )
+  `);
   // Geçerli bir AES-GCM şifreli dosya en az 16 bayttır; daha küçükler bozuk/deneme kaydıdır
   await pool.query(`DELETE FROM blobs WHERE octet_length(data) < 16`);
   console.log('✅ PostgreSQL tabloları hazır.');

@@ -1324,6 +1324,27 @@ server.on('upgrade', async (req, socket) => {
 (async () => {
   try {
     await initDb();
+    // Yeni tablolar: db.js eski kalsa bile sunucu bunları kendisi oluşturur
+    const NOW = `to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')`;
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS fcm_tokens (
+        token TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        updated_at TEXT DEFAULT (${NOW})
+      )
+    `);
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS invites (
+        token_hash TEXT PRIMARY KEY,
+        inviter_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        target_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        expires_at TEXT NOT NULL,
+        used_at TEXT DEFAULT '',
+        created_at TEXT DEFAULT (${NOW})
+      )
+    `);
+    await db.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS key_backup TEXT DEFAULT ''`);
+    await db.query(`ALTER TABLE blobs ADD COLUMN IF NOT EXISTS owner_id TEXT REFERENCES users(id) ON DELETE CASCADE`);
     vapidKeys = await ensureVapidKeysDb(db);
   } catch (e) {
     console.error('[HATA] Veritabanına bağlanılamadı:', e.message);
