@@ -336,6 +336,7 @@ async function startApp() {
   connectWebSocket();
   startIncomingCallPoller();
   await flushPendingContactImport();
+  await flushPendingPick();
   await Promise.all([loadContacts(), loadStories(), loadCallLogs()]);
   renderSidebar();
 
@@ -832,43 +833,83 @@ document.getElementById('confirmChoosePhoneBtn').onclick = async () => {
   if (pendingPhoneChoiceCb) { const cb = pendingPhoneChoiceCb; pendingPhoneChoiceCb = null; await cb(val); }
 };
 
-document.getElementById('pickFromPhoneBtn').onclick = () => {
+// Rehberden seçilen kişiyi işler (seçim sonrası sayfa yeniden yüklense bile kaybolmaz)
+async function processPickedContacts(picked) {
+  const all = [];
+  for (const person of picked || []) {
+    const contactName = extractAllStringsDeep(person && person.name)[0] || 'Rehber Kişisi';
+    const rawTels = extractAllStringsDeep(person && person.tel);
+    const uniqueTels = [];
+    const seen = new Set();
+    for (const t of rawTels) {
+      const digits = String(t).replace(/\D/g, '').slice(-10);
+      if (digits.length >= 7 && !seen.has(digits)) { seen.add(digits); uniqueTels.push(t); }
+    }
+    all.push({ contactName, uniqueTels });
+  }
+  if (all.length === 0) {
+    alert('Rehberden kişi bilgisi gelmedi. Kişiyi seçtikten sonra "Bitti"ye basın. Sorun devam ederse numarayı 2. bölümden elle ekleyin.');
+    return;
+  }
+  const { contactName, uniqueTels } = all[0];
+  if (uniqueTels.length === 0) {
+    document.getElementById('addContactModal').classList.remove('hidden');
+    document.getElementById('newContactName').value = contactName;
+    alert(`"${contactName}" kişisinin numarası rehberden alınamadı. Numarayı 2. bölüme elle yazıp kaydedin.`);
+    return;
+  }
+  document.getElementById('addContactModal').classList.add('hidden');
+  if (uniqueTels.length === 1) {
+    await saveNewContactsWithRetry({ contacts: [{ name: contactName, phone: uniqueTels[0] }] });
+    return;
+  }
+  showChoosePhoneModal(contactName, uniqueTels, async (chosen) => {
+    const listToSave = chosen === '__ALL__'
+      ? uniqueTels.map((ph, idx) => ({ name: `${contactName} (${idx + 1})`, phone: ph }))
+      : [{ name: contactName, phone: chosen }];
+    await saveNewContactsWithRetry({ contacts: listToSave });
+  });
+}
+
+document.getElementById('pickFromPhoneBtn').onclick = async () => {
   if (!window.isSecureContext) return alert('Telefon rehberine erişmek için sayfanın HTTPS adresinden açılması gerekir.');
-  if (navigator.contacts && typeof navigator.contacts.select === 'function') {
-    navigator.contacts.select(['name', 'tel'], { multiple: false })
-      .then(async (picked) => {
-        if (!picked || picked.length === 0) return;
-        const person = picked[0];
-        const contactName = extractAllStringsDeep(person.name)[0] || 'Rehber Kişisi';
-        const rawTels = extractAllStringsDeep(person.tel);
-
-        const uniqueTels = [];
-        const seen = new Set();
-        for (const t of rawTels) {
-          const digits = t.replace(/\D/g, '').slice(-10);
-          if (digits.length >= 7 && !seen.has(digits)) { seen.add(digits); uniqueTels.push(t); }
-        }
-
-        document.getElementById('addContactModal').classList.add('hidden');
-
-        if (uniqueTels.length === 0) {
-          document.getElementById('newContactName').value = contactName;
-          document.getElementById('addContactModal').classList.remove('hidden');
-          return alert(`"${contactName}" kişisinde kayıtlı numara bulunamadı.`);
-        }
-
-        showChoosePhoneModal(contactName, uniqueTels, async (chosen) => {
-          const listToSave = chosen === '__ALL__'
-            ? uniqueTels.map((p, idx) => ({ name: `${contactName} (${idx + 1})`, phone: p }))
-            : [{ name: contactName, phone: chosen }];
-          await saveNewContactsWithRetry({ contacts: listToSave });
-        });
-      })
-      .catch((err) => { if (err && err.name !== 'AbortError') alert('Rehber açılamadı: ' + err.message); });
-  } else {
-    alert('Bu cihaz doğrudan rehber penceresini desteklemiyor. "iPhone / .vcf Dosyası" veya numara kutusunu kullanın.');
+  if (!(navigator.contacts && typeof navigator.contacts.select === 'function')) {
+    alert('Bu cihaz doğrudan rehber penceresini desteklemiyor. "iPhone / .vcf Yükle" veya numara kutusunu kullanın.');
+    return;
+  }
+  let picked;
+  try {
+    picked = await navigator.contacts.select(['name', 'tel'], { multiple: false });
+  } catch (err) {
+    if (err && err.name === 'AbortError') return;
+    alert('Rehber açılamadı: ' + (err && err.message ? err.message : err));
+    return;
+  }
+  // Ham sonucu hemen sakla: Android sayfayı arka planda yeniden yüklerse kaybolmasın
+  const plain = (picked || []).map((x) => ({ name: extractAllStringsDeep(x && x.name), tel: extractAllStringsDeep(x && x.tel) }));
+  try { localStorage.setItem('nexus_pending_pick', JSON.stringify(plain)); } catch {}
+  // Rehberden dönüşte sayfanın tekrar görünür olmasını bekle
+  if (document.hidden) {
+    await new Promise((res) => {
+      const f = () => { if (!document.hidden) { document.removeEventListener('visibilitychange', f); res(); } };
+      document.addEventListener('visibilitychange', f);
+    });
+  }
+  localStorage.removeItem('nexus_pending_pick');
+  try {
+    await processPickedContacts(plain);
+  } catch (err) {
+    alert('Kişi eklenemedi: ' + (err && err.message ? err.message : err));
   }
 };
+
+// Seçim sırasında sayfa yeniden yüklendiyse yarım kalan seçimi tamamla
+async function flushPendingPick() {
+  const raw = localStorage.getItem('nexus_pending_pick');
+  if (!raw) return;
+  localStorage.removeItem('nexus_pending_pick');
+  try { await processPickedContacts(JSON.parse(raw)); } catch {}
+}
 
 document.getElementById('pickVcfFileBtn').onclick = () => document.getElementById('vcfFileInput').click();
 document.getElementById('vcfFileInput').onchange = async (e) => {
