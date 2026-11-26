@@ -243,6 +243,7 @@ document.getElementById('regForm').onsubmit = async (e) => {
     const password = document.getElementById('regPass').value;
     const norm = clientNormPhone(phone);
     if (password.length < 8) { alert('Şifre en az 8 karakter olmalıdır.'); return; }
+    await e2ee.resetLocalIdentity(norm);
     const pubJwkStr = await e2ee.initForUser(norm);
     const keyBackup = await e2ee.createKeyBackup(password);
     const data = await api('/api/auth/register', 'POST', { displayName, phone, password, publicKeyJwk: pubJwkStr, keyBackup, deviceType });
@@ -1789,8 +1790,11 @@ function checkPeerKeyChange(peer) {
     }
     try {
       resetSessionState();
-      const pubJwkStr = await e2ee.initForUser(clientNormPhone(info.phoneNormalized));
+      const invNorm = clientNormPhone(info.phoneNormalized);
+      await e2ee.resetLocalIdentity(invNorm);
+      const pubJwkStr = await e2ee.initForUser(invNorm);
       const keyBackup = await e2ee.createKeyBackup(pin);
+      if (!keyBackup) { alert('❌ Şifreleme anahtarı bu cihazda oluşturulamadı. Sayfayı yenileyip tekrar deneyin.'); return; }
       const data = await api(`/api/invites/${encodeURIComponent(invToken)}/accept`, 'POST', { displayName: name, pin, publicKeyJwk: pubJwkStr, keyBackup, deviceType });
       e2ee.clearPendingBackup();
       token = data.token;

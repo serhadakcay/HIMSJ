@@ -55,6 +55,15 @@ class NexusE2EE {
     return rec;
   }
 
+  // Yeni hesap açılırken bu numaraya ait eski yerel anahtarları siler (temiz başlangıç)
+  async resetLocalIdentity(phoneNorm) {
+    const n = String(phoneNorm || '').replace(/\D/g, '');
+    await NexusIDB.del(`identity_${n}`).catch(() => {});
+    await NexusIDB.del(`vault_${n}`).catch(() => {});
+    await NexusIDB.del(`vaultkey_${n}`).catch(() => {});
+    try { localStorage.removeItem(`nexus_identity_jwk_${n}`); localStorage.removeItem(`nexus_plain_vault_${n}`); } catch {}
+  }
+
   async initForUser(phoneNorm) {
     this.myPhoneNorm = String(phoneNorm || '').replace(/\D/g, '');
     this.idKey = `identity_${this.myPhoneNorm}`;
