@@ -333,6 +333,7 @@ async function startApp() {
     }
   }
 
+  registerNativePush();
   connectWebSocket();
   startIncomingCallPoller();
   await flushPendingContactImport();
@@ -343,12 +344,25 @@ async function startApp() {
   const params = new URLSearchParams(location.search);
   const answerCallId = params.get('answerCall');
   const chatWithId = params.get('chatWith');
-  if (answerCallId) {
+  const rejectCallId = params.get('rejectCall');
+  const incomingCallId = params.get('incomingCall');
+  if (answerCallId || chatWithId || rejectCallId || incomingCallId) history.replaceState(null, '', '/');
+  if (rejectCallId) {
+    await api('/api/calls/reject', 'POST', { callId: rejectCallId }).catch(() => {});
+  } else if (answerCallId) {
     const res = await api(`/api/calls/active?callId=${encodeURIComponent(answerCallId)}`).catch(() => null);
     if (res?.call) {
       incomingOffer = res.call;
       pendingCandidates = res.call.iceCandidates || [];
       await acceptIncomingCall();
+    }
+  } else if (incomingCallId) {
+    // Kilit ekranından / bildirimden açıldı: gelen arama ekranını göster
+    const res = await api(`/api/calls/active?callId=${encodeURIComponent(incomingCallId)}`).catch(() => null);
+    if (res?.call && !activeCall) {
+      incomingOffer = res.call;
+      pendingCandidates = res.call.iceCandidates || [];
+      showIncomingCallScreen(res.call);
     }
   } else if (chatWithId) {
     const peer = contacts.find((c) => c.id === chatWithId);
@@ -745,6 +759,12 @@ function renderSidebar() {
       location.reload();
     };
     listEl.querySelector('#settingsLogoutBtn').onclick = async () => {
+      try {
+        if (window.AndroidNative && window.AndroidNative.getFcmToken) {
+          await api('/api/push/fcm-unregister', 'POST', { token: window.AndroidNative.getFcmToken() });
+          if (window.AndroidNative.setSessionToken) window.AndroidNative.setSessionToken('');
+        }
+      } catch {}
       await api('/api/auth/logout', 'POST').catch(() => {});
       resetSessionState();
       localStorage.removeItem('nexus_token');
@@ -1900,3 +1920,20 @@ function checkPeerKeyChange(peer) {
     }
   };
 })();
+
+
+// Android uygulaması içinde çalışıyorsa sayfayı buna göre işaretle
+if (window.AndroidNative) document.body.classList.add('native-app');
+
+
+// ---- Android uygulaması: Firebase bildirim anahtarını sunucuya kaydet ----
+async function registerNativePush() {
+  if (!(window.AndroidNative && typeof window.AndroidNative.getFcmToken === 'function')) return;
+  try { if (window.AndroidNative.setSessionToken) window.AndroidNative.setSessionToken(token || ''); } catch {}
+  const send = async (t) => {
+    if (!t || !token) return;
+    try { await api('/api/push/fcm-register', 'POST', { token: t }); } catch {}
+  };
+  window.onFcmToken = (t) => { send(t); };
+  try { await send(window.AndroidNative.getFcmToken()); } catch {}
+}
