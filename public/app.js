@@ -1,4 +1,15 @@
 
+// Sunucudaki normalizePhone ile AYNI sonucu üretir (anahtarın her açılışta aynı isimle bulunması için)
+function clientNormPhone(raw) {
+  let d = String(raw || '').replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, '').replace(/\D/g, '');
+  if (!d) return '';
+  if (d.startsWith('00')) d = d.slice(2);
+  if (d.length === 10 && !d.startsWith('90')) d = '90' + d;
+  else if (d.length === 11 && d.startsWith('0')) d = '90' + d.slice(1);
+  else if (d.length === 13 && d.startsWith('900')) d = '90' + d.slice(3);
+  return d;
+}
+
 // --- TELEFONUN KENDİ REHBERİNE (ANDROID & iOS) KİŞİ KAYDETME MOTORU ---
 function normalizeE164Client(rawPhone) {
   let digits = String(rawPhone || '').replace(/\D/g, '');
@@ -230,7 +241,7 @@ document.getElementById('regForm').onsubmit = async (e) => {
     const displayName = document.getElementById('regName').value.trim();
     const phone = document.getElementById('regPhone').value.trim();
     const password = document.getElementById('regPass').value;
-    const norm = phone.replace(/\D/g, '');
+    const norm = clientNormPhone(phone);
     if (password.length < 8) { alert('Şifre en az 8 karakter olmalıdır.'); return; }
     const pubJwkStr = await e2ee.initForUser(norm);
     const keyBackup = await e2ee.createKeyBackup(password);
@@ -249,7 +260,7 @@ document.getElementById('loginForm').onsubmit = async (e) => {
     resetSessionState();
     const phone = document.getElementById('loginPhone').value.trim();
     const password = document.getElementById('loginPass').value;
-    const norm = phone.replace(/\D/g, '');
+    const norm = clientNormPhone(phone);
     await e2ee.initForUser(norm);
     const data = await api('/api/auth/login', 'POST', { phone, password, deviceType });
     token = data.token;
@@ -279,7 +290,7 @@ document.getElementById('loginForm').onsubmit = async (e) => {
   try {
     const data = await api('/api/auth/me');
     me = data.user;
-    await e2ee.initForUser(me.phone_normalized.replace(/\D/g, ''));
+    await e2ee.initForUser(clientNormPhone(me.phone_normalized));
     startApp();
   } catch { localStorage.removeItem('nexus_token'); }
 })();
@@ -667,7 +678,9 @@ function renderSidebar() {
           <h4>🎨 Görünüm & Yazı Ayarları</h4>
           <button type="button" class="btn-sec" id="openAppFromSettingsBtn" style="margin-top:6px;margin-bottom:0;">🖼️ Arkaplan Fotoğrafı & Yazı Tipi/Boyutu</button>
         </div>
-        <button type="button" class="btn-red" id="settingsLogoutBtn">🚪 Oturumu Kapat</button>
+        <button type="button" class="btn-sm btn-sec" id="settingsChangePwBtn" style="margin-bottom:8px;">🔑 Şifre Değiştir</button>
+            <button type="button" class="btn-red" id="settingsLogoutBtn">🚪 Oturumu Kapat</button>
+            <button type="button" class="btn-red" id="settingsDeleteAccountBtn" style="margin-top:8px;opacity:.85;">🗑️ Hesabımı Kalıcı Olarak Sil</button>
       </div>
     `;
 
@@ -681,6 +694,54 @@ function renderSidebar() {
       alert('✅ Profil bilgileriniz güncellendi!');
     };
     listEl.querySelector('#openAppFromSettingsBtn').onclick = () => document.getElementById('appearanceModal').classList.remove('hidden');
+    listEl.querySelector('#settingsChangePwBtn').onclick = async () => {
+      const oldPw = prompt('Mevcut şifreniz:');
+      if (!oldPw) return;
+      const newPw = prompt('Yeni şifre (en az 8 karakter):');
+      if (!newPw) return;
+      if (newPw.length < 8) { alert('Yeni şifre en az 8 karakter olmalıdır.'); return; }
+      const newPw2 = prompt('Yeni şifreyi tekrar girin:');
+      if (newPw !== newPw2) { alert('Yeni şifreler birbiriyle aynı değil.'); return; }
+      try {
+        let keyBackup = '';
+        const kb = await api('/api/auth/key-backup');
+        if (kb.keyBackup) {
+          try {
+            keyBackup = await e2ee.rewrapBackup(kb.keyBackup, oldPw, newPw);
+          } catch {
+            alert('❌ Mevcut şifreniz hatalı.');
+            return;
+          }
+        }
+        await api('/api/auth/password', 'PUT', { oldPassword: oldPw, newPassword: newPw, keyBackup });
+        alert('✅ Şifreniz değiştirildi. Diğer cihazlardaki oturumlar kapatıldı; oralarda yeni şifrenizle giriş yapın.');
+      } catch (err) {
+        alert('❌ ' + (err && err.message ? err.message : 'Şifre değiştirilemedi.'));
+      }
+    };
+    listEl.querySelector('#settingsDeleteAccountBtn').onclick = async () => {
+      const ok = confirm('⚠️ Hesabınız KALICI olarak silinecek.\n\nTüm mesajlarınız, rehberiniz, arama geçmişiniz, durumlarınız ve dosyalarınız silinir. Bu işlem GERİ ALINAMAZ.\n\nDevam etmek istiyor musunuz?');
+      if (!ok) return;
+      const pw = prompt('Onaylamak için şifrenizi girin:');
+      if (!pw) return;
+      try {
+        await api('/api/auth/account', 'DELETE', { password: pw });
+      } catch (err) {
+        alert('❌ ' + (err && err.message ? err.message : 'Hesap silinemedi.'));
+        return;
+      }
+      try {
+        const norm = e2ee.myPhoneNorm;
+        await NexusIDB.del(`identity_${norm}`).catch(() => {});
+        await NexusIDB.del(`vault_${norm}`).catch(() => {});
+        await NexusIDB.del(`vaultkey_${norm}`).catch(() => {});
+        Object.keys(localStorage).filter((k) => k.startsWith(`nexus_seen_peer_key_${me.id}_`)).forEach((k) => localStorage.removeItem(k));
+      } catch {}
+      resetSessionState();
+      localStorage.removeItem('nexus_token');
+      alert('✅ Hesabınız ve tüm verileriniz silindi.');
+      location.reload();
+    };
     listEl.querySelector('#settingsLogoutBtn').onclick = async () => {
       await api('/api/auth/logout', 'POST').catch(() => {});
       resetSessionState();

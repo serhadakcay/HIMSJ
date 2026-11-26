@@ -425,6 +425,63 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 200, { ok: true });
       }
 
+      // Kendi anahtar yedeğini getir (şifre değiştirmeden önce yeniden şifrelemek için)
+      if (pathname === '/api/auth/key-backup' && req.method === 'GET') {
+        const row = await db.prepare('SELECT key_backup FROM users WHERE id = ?').get(me.id);
+        return sendJson(res, 200, { keyBackup: (row && row.key_backup) || '' });
+      }
+
+      // Şifre değiştir: eski şifre doğrulanır, anahtar yedeği yeni şifreyle güncellenir, diğer oturumlar kapatılır
+      if (pathname === '/api/auth/password' && req.method === 'PUT') {
+        const body = await readJsonBody(req);
+        const oldPw = String(body.oldPassword || '');
+        const newPw = String(body.newPassword || '');
+        if (!verifyPassword(oldPw, me.password_hash, me.password_salt)) {
+          return sendJson(res, 401, { error: 'Mevcut şifreniz hatalı.' });
+        }
+        if (newPw.length < 8) return sendJson(res, 400, { error: 'Yeni şifre en az 8 karakter olmalıdır.' });
+        if (newPw === oldPw) return sendJson(res, 400, { error: 'Yeni şifre eskisiyle aynı olamaz.' });
+        const current = await db.prepare('SELECT key_backup FROM users WHERE id = ?').get(me.id);
+        const newBackup = String(body.keyBackup || '').slice(0, 20000);
+        if (current && current.key_backup) {
+          // Yedek varsa yeni şifreyle şifrelenmiş hali gönderilmek zorunda ve aynı anahtara ait olmalı
+          let samePub = false;
+          try {
+            const a = JSON.parse(current.key_backup).pub;
+            const b = JSON.parse(newBackup).pub;
+            samePub = a && b && a.x === b.x && a.y === b.y;
+          } catch {}
+          if (!samePub) return sendJson(res, 400, { error: 'Anahtar yedeği güncellenemedi. Şifre değiştirilmedi.' });
+        }
+        const { hash, salt } = hashPassword(newPw);
+        await db.prepare('UPDATE users SET password_hash = ?, password_salt = ? WHERE id = ?').run(hash, salt, me.id);
+        if (newBackup && current && current.key_backup) {
+          await db.prepare('UPDATE users SET key_backup = ? WHERE id = ?').run(newBackup, me.id);
+        }
+        const authHeader = req.headers['authorization'] || '';
+        const tok = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+        await db.prepare('DELETE FROM sessions WHERE user_id = ? AND token != ?').run(me.id, tok);
+        return sendJson(res, 200, { ok: true });
+      }
+
+      // Hesabı kalıcı olarak sil (şifre onayı ister). Mesajlar, rehber, aramalar, durumlar ve dosyalar da silinir.
+      if (pathname === '/api/auth/account' && req.method === 'DELETE') {
+        const body = await readJsonBody(req);
+        if (!verifyPassword(String(body.password || ''), me.password_hash, me.password_salt)) {
+          return sendJson(res, 401, { error: 'Şifre hatalı. Hesap silinmedi.' });
+        }
+        await db.prepare('DELETE FROM users WHERE id = ?').run(me.id);
+        // Artık hiçbir rehberde bulunmayan kayıtsız (yer tutucu) kişileri temizle
+        await db.prepare(`
+          DELETE FROM users u WHERE u.is_registered = 0
+            AND NOT EXISTS (SELECT 1 FROM contacts c WHERE c.contact_user_id = u.id)
+        `).run();
+        const set = onlineSockets.get(me.id);
+        if (set) { for (const cl of set) { try { cl.socket.destroy(); } catch {} } onlineSockets.delete(me.id); }
+        for (const [id, call] of activeCalls) if (call.callerId === me.id || call.targetUserId === me.id) activeCalls.delete(id);
+        return sendJson(res, 200, { ok: true });
+      }
+
       if (pathname === '/api/auth/me' && req.method === 'GET') {
         return sendJson(res, 200, {
           user: {
@@ -487,8 +544,9 @@ const server = http.createServer(async (req, res) => {
         const b64 = String(body.encryptedBase64 || '');
         if (!b64) return sendJson(res, 400, { error: 'Boş şifreli veri.' });
         const buf = Buffer.from(b64, 'base64');
+        if (buf.length < 16) return sendJson(res, 400, { error: 'Geçersiz şifreli dosya.' });
         const blobId = crypto.randomUUID() + '.bin';
-        await db.prepare('INSERT INTO blobs (id, data) VALUES (?, ?)').run(blobId, buf);
+        await db.prepare('INSERT INTO blobs (id, data, owner_id) VALUES (?, ?, ?)').run(blobId, buf, me.id);
         return sendJson(res, 201, { blobUrl: `/blobs/${blobId}`, size: buf.length });
       }
 

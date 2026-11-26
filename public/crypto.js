@@ -187,6 +187,18 @@ class NexusE2EE {
     return this.publicKeyJwkStr;
   }
 
+  // Mevcut yedeği eski şifreyle açıp yeni şifreyle yeniden şifreler (anahtarın kendisi değişmez)
+  async rewrapBackup(backupStr, oldPassword, newPassword) {
+    const b = JSON.parse(backupStr);
+    const oldK = await this._passwordKey(oldPassword, this._fromB64(b.salt));
+    const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: this._fromB64(b.iv) }, oldK, this._fromB64(b.ct));
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const newK = await this._passwordKey(newPassword, salt);
+    const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, newK, plain);
+    return JSON.stringify({ v: 1, pub: b.pub, salt: this._toB64(salt), iv: this._toB64(iv), ct: this._toB64(ct) });
+  }
+
   // ---- Güvenlik numarası: İKİ tarafın anahtarından üretilir (iki telefonda da aynı çıkar) ----
   async computeSafetyNumber(peerPubJwkStr) {
     const norm = (s) => {
