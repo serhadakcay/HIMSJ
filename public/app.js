@@ -847,10 +847,7 @@ async function processPickedContacts(picked) {
     }
     all.push({ contactName, uniqueTels });
   }
-  if (all.length === 0) {
-    alert('Rehberden kişi bilgisi gelmedi. Kişiyi seçtikten sonra "Bitti"ye basın. Sorun devam ederse numarayı 2. bölümden elle ekleyin.');
-    return;
-  }
+  if (all.length === 0) return; // Seçim iptal edildi veya boş döndü: sessizce çık
   const { contactName, uniqueTels } = all[0];
   if (uniqueTels.length === 0) {
     document.getElementById('addContactModal').classList.remove('hidden');
@@ -878,8 +875,14 @@ document.getElementById('pickFromPhoneBtn').onclick = async () => {
     return;
   }
   let picked;
+  const startedAt = Date.now();
   try {
     picked = await navigator.contacts.select(['name', 'tel'], { multiple: false });
+    // Bazı Android sürümlerinde seçici, kullanıcı "Bitti"ye basmadan boş sonuçla hemen dönebiliyor
+    if ((!picked || picked.length === 0) && Date.now() - startedAt < 1500) {
+      alert('Rehber penceresi erken kapandı. Kişiyi seçip "Bitti"ye bastıktan sonra lütfen bekleyin; gerekirse butona tekrar basın.');
+      return;
+    }
   } catch (err) {
     if (err && err.name === 'AbortError') return;
     alert('Rehber açılamadı: ' + (err && err.message ? err.message : err));
@@ -887,6 +890,7 @@ document.getElementById('pickFromPhoneBtn').onclick = async () => {
   }
   // Ham sonucu hemen sakla: Android sayfayı arka planda yeniden yüklerse kaybolmasın
   const plain = (picked || []).map((x) => ({ name: extractAllStringsDeep(x && x.name), tel: extractAllStringsDeep(x && x.tel) }));
+  if (plain.length === 0) return;
   try { localStorage.setItem('nexus_pending_pick', JSON.stringify(plain)); } catch {}
   // Rehberden dönüşte sayfanın tekrar görünür olmasını bekle
   if (document.hidden) {
