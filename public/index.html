@@ -126,8 +126,17 @@
 
     <form id="loginForm">
       <input type="tel" id="loginPhone" placeholder="Cep Telefonu (Örn: 0532 111 22 33)" required />
-      <input type="password" id="loginPass" placeholder="Şifreniz" required />
-      <button type="submit">🔒 Şifre ile Giriş Yap</button>
+      <input type="password" id="loginPass" placeholder="Şifreniz veya PIN" required />
+      <button type="submit">🔒 Giriş Yap</button>
+    </form>
+
+    <form id="inviteForm" class="hidden">
+      <div id="inviteInfoText" style="margin-bottom:10px;line-height:1.5;"></div>
+      <input type="text" id="invName" placeholder="Adınız Soyadınız" required />
+      <input type="password" id="invPin" inputmode="numeric" pattern="[0-9]{6,12}" maxlength="12" placeholder="6 haneli PIN belirleyin" required />
+      <input type="password" id="invPin2" inputmode="numeric" pattern="[0-9]{6,12}" maxlength="12" placeholder="PIN'i tekrar girin" required />
+      <div style="font-size:12px;opacity:.75;margin:-2px 0 10px;">PIN'i unutmayın: başka bir telefondan girerken ve mesajlarınızı geri yüklerken gerekecek.</div>
+      <button type="submit">🚀 Hemen Başla</button>
     </form>
 
     <form id="regForm" class="hidden">
@@ -383,6 +392,6 @@
   </div>
 
   <script src="crypto.js?v=17"></script>
-  <script src="app.js?v=17"></script>
+  <script src="app.js?v=18"></script>
 </body>
 </html>

@@ -119,6 +119,25 @@ function findCallBetween(userA, userB, callId) {
   return null;
 }
 
+function isValidSecret(pw) {
+  const p = String(pw || '');
+  return p.length >= 8 || /^\d{6,}$/.test(p); // en az 8 karakterli şifre VEYA en az 6 haneli PIN
+}
+const hashToken = (t) => crypto.createHash('sha256').update(String(t)).digest('hex');
+const INVITE_HOURS = 24;
+
+async function findValidInvite(token) {
+  if (!/^[a-f0-9]{48}$/.test(String(token || ''))) return null;
+  return await db.prepare(`
+    SELECT i.*, inv.display_name AS inviter_name, t.display_name AS target_name,
+           t.phone AS target_phone, t.phone_normalized AS target_norm, t.is_registered AS target_registered
+    FROM invites i
+    JOIN users inv ON inv.id = i.inviter_id
+    JOIN users t ON t.id = i.target_user_id
+    WHERE i.token_hash = ? AND i.used_at = '' AND i.expires_at > datetime('now')
+  `).get(hashToken(token));
+}
+
 class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
 }
@@ -208,7 +227,7 @@ async function getAuthUser(req) {
 }
 
 function getPublicUrl(req) {
-  const fixed = process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL;
+  const fixed = process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || 'https://sermsj.onrender.com';
   if (fixed) return fixed.replace(/\/+$/, '');
   const host = req.headers.host || `localhost:${PORT}`;
   const proto = req.headers['x-forwarded-proto'] || (host.includes('localhost') ? 'http' : 'https');
@@ -413,6 +432,52 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
+    // ---- Davet linki ile giriş (oturum gerektirmez) ----
+    const inviteInfoMatch = pathname.match(/^\/api\/invites\/([a-f0-9]+)$/);
+    if (inviteInfoMatch && req.method === 'GET') {
+      const inv = await findValidInvite(inviteInfoMatch[1]);
+      if (!inv) return sendJson(res, 404, { error: 'Davet linki geçersiz, kullanılmış veya süresi dolmuş. Sizi davet eden kişiden yeni link isteyin.' });
+      if (inv.target_registered === 1) return sendJson(res, 409, { error: 'Bu numara zaten kayıtlı. Giriş Yap sekmesinden PIN veya şifrenizle girin.' });
+      return sendJson(res, 200, { inviterName: inv.inviter_name, name: inv.target_name, phone: inv.target_phone, phoneNormalized: inv.target_norm });
+    }
+
+    const inviteAcceptMatch = pathname.match(/^\/api\/invites\/([a-f0-9]+)\/accept$/);
+    if (inviteAcceptMatch && req.method === 'POST') {
+      const body = await readJsonBody(req);
+      const inv = await findValidInvite(inviteAcceptMatch[1]);
+      if (!inv) return sendJson(res, 404, { error: 'Davet linki geçersiz, kullanılmış veya süresi dolmuş.' });
+      if (inv.target_registered === 1) return sendJson(res, 409, { error: 'Bu numara zaten kayıtlı. Giriş Yap sekmesinden girin.' });
+      const displayName = String(body.displayName || inv.target_name || '').trim().slice(0, 60);
+      const pin = String(body.pin || '');
+      const publicKeyJwk = String(body.publicKeyJwk || '');
+      const keyBackup = String(body.keyBackup || '').slice(0, 20000);
+      const deviceType = body.deviceType === 'desktop' ? 'desktop' : 'mobile';
+      if (displayName.length < 2) return sendJson(res, 400, { error: 'Adınız en az 2 karakter olmalıdır.' });
+      if (!/^\d{6,12}$/.test(pin)) return sendJson(res, 400, { error: 'PIN 6-12 haneli bir sayı olmalıdır.' });
+      if (!publicKeyJwk || !keyBackup) return sendJson(res, 400, { error: 'Şifreleme anahtarı oluşturulamadı.' });
+
+      // Linki hemen "kullanıldı" yap (aynı link iki kez kullanılamaz)
+      const claim = await db.prepare("UPDATE invites SET used_at = CURRENT_TIMESTAMP WHERE token_hash = ? AND used_at = ''").run(hashToken(inviteAcceptMatch[1]));
+      if (!claim.changes) return sendJson(res, 404, { error: 'Bu davet linki zaten kullanılmış.' });
+
+      const userId = inv.target_user_id;
+      const { hash, salt } = hashPassword(pin);
+      const fp = generateFingerprint(publicKeyJwk);
+      await db.prepare(`
+        UPDATE users SET display_name = ?, password_hash = ?, password_salt = ?, is_registered = 1,
+               public_key_jwk = ?, key_fingerprint = ?, key_backup = ?
+        WHERE id = ?
+      `).run(displayName, hash, salt, publicKeyJwk, fp, keyBackup, userId);
+      // Bu numaraya ait diğer davet linklerini geçersiz kıl
+      await db.prepare("UPDATE invites SET used_at = CURRENT_TIMESTAMP WHERE target_user_id = ? AND used_at = ''").run(userId);
+      await integratePhoneContacts(userId, inv.target_norm, displayName, inv.target_phone);
+
+      const token = crypto.randomBytes(32).toString('hex');
+      await db.prepare('INSERT INTO sessions (token, user_id, device_name, device_type) VALUES (?, ?, ?, ?)').run(token, userId, deviceType === 'desktop' ? 'Bilgisayar' : 'Cep Telefonu', deviceType);
+      const user = await db.prepare('SELECT id, display_name, phone, phone_normalized, public_key_jwk, key_fingerprint, avatar_color, avatar_url, bio FROM users WHERE id = ?').get(userId);
+      return sendJson(res, 201, { token, user });
+    }
+
     if (pathname.startsWith('/api/')) {
       const me = await getAuthUser(req);
       if (!me) return sendJson(res, 401, { error: 'Oturum geçersiz.' });
@@ -423,6 +488,34 @@ const server = http.createServer(async (req, res) => {
         const tok = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
         if (tok) await db.prepare('DELETE FROM sessions WHERE token = ?').run(tok);
         return sendJson(res, 200, { ok: true });
+      }
+
+      // Kayıtsız bir kişi için tek kullanımlık, 24 saat geçerli davet linki üret
+      if (pathname === '/api/invites' && req.method === 'POST') {
+        const body = await readJsonBody(req);
+        const contactId = String(body.contactId || '');
+        const row = await db.prepare(`
+          SELECT c.contact_name, c.contact_phone, u.is_registered
+          FROM contacts c JOIN users u ON u.id = c.contact_user_id
+          WHERE c.user_id = ? AND c.contact_user_id = ?
+        `).get(me.id, contactId);
+        if (!row) return sendJson(res, 404, { error: 'Kişi rehberinizde bulunamadı.' });
+        if (row.is_registered === 1) return sendJson(res, 409, { error: 'Bu kişi zaten NexusChat kullanıyor.' });
+        const recent = await db.prepare(`SELECT COUNT(*) AS n FROM invites WHERE inviter_id = ? AND created_at > to_char((now() - interval '1 hour') AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')`).get(me.id);
+        if (recent && recent.n >= 30) return sendJson(res, 429, { error: 'Çok fazla davet gönderdiniz. Biraz sonra tekrar deneyin.' });
+        const token = crypto.randomBytes(24).toString('hex');
+        await db.prepare(`
+          INSERT INTO invites (token_hash, inviter_id, target_user_id, expires_at)
+          VALUES (?, ?, ?, to_char((now() + interval '${INVITE_HOURS} hours') AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'))
+        `).run(hashToken(token), me.id, contactId);
+        const link = `${getPublicUrl(req)}/?davet=${token}`;
+        const invite = buildInviteLinks({ targetPhone: row.contact_phone, targetName: row.contact_name, senderName: me.display_name, senderPhone: me.phone, appUrl: link });
+        invite.inviteText = invite.inviteText + ' (Link tek kullanımlık ve 24 saat geçerlidir.)';
+        const enc = encodeURIComponent(invite.inviteText);
+        const wa = String(invite.phoneNormalized || '').replace(/\D/g, '');
+        invite.whatsappUrl = wa ? `https://wa.me/${wa}?text=${enc}` : `https://wa.me/?text=${enc}`;
+        invite.smsUrl = invite.phoneNormalized ? `sms:${invite.phoneNormalized}?body=${enc}` : `sms:?body=${enc}`;
+        return sendJson(res, 201, { ...invite, link });
       }
 
       // Kendi anahtar yedeğini getir (şifre değiştirmeden önce yeniden şifrelemek için)
@@ -439,7 +532,7 @@ const server = http.createServer(async (req, res) => {
         if (!verifyPassword(oldPw, me.password_hash, me.password_salt)) {
           return sendJson(res, 401, { error: 'Mevcut şifreniz hatalı.' });
         }
-        if (newPw.length < 8) return sendJson(res, 400, { error: 'Yeni şifre en az 8 karakter olmalıdır.' });
+        if (!isValidSecret(newPw)) return sendJson(res, 400, { error: 'Yeni şifre en az 8 karakter veya en az 6 haneli PIN olmalıdır.' });
         if (newPw === oldPw) return sendJson(res, 400, { error: 'Yeni şifre eskisiyle aynı olamaz.' });
         const current = await db.prepare('SELECT key_backup FROM users WHERE id = ?').get(me.id);
         const newBackup = String(body.keyBackup || '').slice(0, 20000);

@@ -160,6 +160,17 @@ async function initDb() {
   `);
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS key_backup TEXT DEFAULT ''`);
   await pool.query(`ALTER TABLE blobs ADD COLUMN IF NOT EXISTS owner_id TEXT REFERENCES users(id) ON DELETE CASCADE`);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS invites (
+      token_hash TEXT PRIMARY KEY,
+      inviter_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      target_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      expires_at TEXT NOT NULL,
+      used_at TEXT DEFAULT '',
+      created_at TEXT DEFAULT (${NOW_TXT})
+    )
+  `);
+  await pool.query(`DELETE FROM invites WHERE expires_at < ${NOW_TXT}`);
   // Geçerli bir AES-GCM şifreli dosya en az 16 bayttır; daha küçükler bozuk/deneme kaydıdır
   await pool.query(`DELETE FROM blobs WHERE octet_length(data) < 16`);
   console.log('✅ PostgreSQL tabloları hazır.');

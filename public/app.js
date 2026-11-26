@@ -697,9 +697,9 @@ function renderSidebar() {
     listEl.querySelector('#settingsChangePwBtn').onclick = async () => {
       const oldPw = prompt('Mevcut şifreniz:');
       if (!oldPw) return;
-      const newPw = prompt('Yeni şifre (en az 8 karakter):');
+      const newPw = prompt('Yeni şifre (en az 8 karakter) veya yeni PIN (en az 6 rakam):');
       if (!newPw) return;
-      if (newPw.length < 8) { alert('Yeni şifre en az 8 karakter olmalıdır.'); return; }
+      if (!(newPw.length >= 8 || /^\d{6,}$/.test(newPw))) { alert('Yeni şifre en az 8 karakter veya en az 6 haneli PIN olmalıdır.'); return; }
       const newPw2 = prompt('Yeni şifreyi tekrar girin:');
       if (newPw !== newPw2) { alert('Yeni şifreler birbiriyle aynı değil.'); return; }
       try {
@@ -940,10 +940,19 @@ async function flushPendingContactImport() {
   }
 }
 
-function showInviteModal(contact) {
-  document.getElementById('invitePreviewText').textContent = `"${contact.inviteText}"`;
-  document.getElementById('inviteWaLink').href = contact.whatsappUrl;
-  document.getElementById('inviteSmsLink').href = contact.smsUrl;
+async function showInviteModal(contact) {
+  let inv = contact;
+  if (contact && contact.id && !contact.isRegistered) {
+    try {
+      inv = await api('/api/invites', 'POST', { contactId: contact.id });
+    } catch (err) {
+      alert('Davet linki oluşturulamadı: ' + (err && err.message ? err.message : ''));
+      return;
+    }
+  }
+  document.getElementById('invitePreviewText').textContent = `"${inv.inviteText}"`;
+  document.getElementById('inviteWaLink').href = inv.whatsappUrl;
+  document.getElementById('inviteSmsLink').href = inv.smsUrl;
   const devSaveBtn = document.getElementById('inviteSaveDeviceContactBtn');
   if (devSaveBtn) {
     devSaveBtn.onclick = () => saveContactToDevicePhoneBook(contact.display_name, contact.phone);
@@ -991,8 +1000,24 @@ function updateChatHeader() {
 
   const devBtn = document.getElementById('saveToDeviceContactsBtn');
   if (devBtn) devBtn.onclick = () => saveContactToDevicePhoneBook(activePeer.display_name, activePeer.phone);
-  document.getElementById('waInviteBtn').onclick = () => window.open(activePeer.whatsappUrl, '_blank');
-  document.getElementById('smsInviteBtn').onclick = () => { location.href = activePeer.smsUrl; };
+  document.getElementById('waInviteBtn').onclick = async () => {
+  if (!activePeer) return;
+  let url = activePeer.whatsappUrl;
+  if (!activePeer.isRegistered) {
+    try { url = (await api('/api/invites', 'POST', { contactId: activePeer.id })).whatsappUrl; }
+    catch (err) { alert('Davet linki oluşturulamadı: ' + (err && err.message ? err.message : '')); return; }
+  }
+  window.open(url, '_blank');
+};
+  document.getElementById('smsInviteBtn').onclick = async () => {
+    if (!activePeer) return;
+    let url = activePeer.smsUrl;
+    if (!activePeer.isRegistered) {
+      try { url = (await api('/api/invites', 'POST', { contactId: activePeer.id })).smsUrl; }
+      catch (err) { alert('Davet linki oluşturulamadı: ' + (err && err.message ? err.message : '')); return; }
+    }
+    location.href = url;
+  };
 }
 
 document.getElementById('backBtn').onclick = () => document.getElementById('appScreen').classList.remove('mobile-chat');
@@ -1724,6 +1749,59 @@ function checkPeerKeyChange(peer) {
       alert(`🔐 Güvenlik Numarası — ${activePeer.display_name}\n\n${sn}\n\nBu numara iki telefonda da AYNI olmalı. Yüz yüze veya telefonda karşılaştırın; aynıysa mesajlarınızı aranızda kimse okuyamaz.`);
     } catch {
       alert('Güvenlik numarası hesaplanamadı.');
+    }
+  };
+})();
+
+
+// ---- Davet linki ile tek adımda başlama (?davet=...) ----
+(async () => {
+  const params = new URLSearchParams(location.search);
+  const invToken = params.get('davet');
+  if (!invToken) return;
+  const form = document.getElementById('inviteForm');
+  if (!form) return;
+  ['loginForm', 'regForm'].forEach((id) => document.getElementById(id)?.classList.add('hidden'));
+  document.querySelector('#authScreen .tabs')?.classList.add('hidden');
+  form.classList.remove('hidden');
+  const infoEl = document.getElementById('inviteInfoText');
+  let info;
+  try {
+    info = await api(`/api/invites/${encodeURIComponent(invToken)}`);
+  } catch (err) {
+    infoEl.textContent = '⚠️ ' + (err && err.message ? err.message : 'Davet linki geçersiz.');
+    form.querySelectorAll('input,button').forEach((el) => { el.disabled = true; });
+    document.querySelector('#authScreen .tabs')?.classList.remove('hidden');
+    document.getElementById('loginForm')?.classList.remove('hidden');
+    return;
+  }
+  infoEl.textContent = `👋 ${info.inviterName} sizi NexusChat'e davet etti. Numaranız: ${info.phone}. Adınızı yazıp bir PIN belirleyin, hemen başlayın.`;
+  document.getElementById('invName').value = info.name && !/^\+?[\d\s]+$/.test(info.name) ? info.name : '';
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const name = document.getElementById('invName').value.trim();
+    const pin = document.getElementById('invPin').value.trim();
+    const pin2 = document.getElementById('invPin2').value.trim();
+    if (!/^\d{6,12}$/.test(pin)) { alert('PIN 6-12 haneli bir sayı olmalıdır.'); return; }
+    if (pin !== pin2) { alert('PIN\'ler birbiriyle aynı değil.'); return; }
+    if (/^(\d)\1+$/.test(pin) || '0123456789012'.includes(pin) || '9876543210987'.includes(pin)) {
+      alert('Bu PIN çok kolay tahmin edilir (111111, 123456 gibi). Başka bir PIN seçin.'); return;
+    }
+    try {
+      resetSessionState();
+      const pubJwkStr = await e2ee.initForUser(clientNormPhone(info.phoneNormalized));
+      const keyBackup = await e2ee.createKeyBackup(pin);
+      const data = await api(`/api/invites/${encodeURIComponent(invToken)}/accept`, 'POST', { displayName: name, pin, publicKeyJwk: pubJwkStr, keyBackup, deviceType });
+      e2ee.clearPendingBackup();
+      token = data.token;
+      localStorage.setItem('nexus_token', token);
+      me = data.user;
+      history.replaceState(null, '', '/');
+      form.classList.add('hidden');
+      document.querySelector('#authScreen .tabs')?.classList.remove('hidden');
+      startApp();
+    } catch (err) {
+      alert('❌ ' + (err && err.message ? err.message : 'Başlatılamadı.'));
     }
   };
 })();
