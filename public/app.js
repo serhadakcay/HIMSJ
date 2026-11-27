@@ -497,6 +497,7 @@ function connectWebSocket() {
       await loadContacts();
       if (currentSideTab === 'chats') renderSidebar();
     } else if (data.type === 'NEW_ENCRYPTED_MESSAGE') {
+      try { const NA = nativeAudio(); if (NA && NA.playMessageSound && (document.hidden || !activePeer || activePeer.id !== data.message.sender_id)) NA.playMessageSound(); } catch {}
       await loadContacts();
       if (currentSideTab === 'chats') renderSidebar();
       if (activePeer) {
@@ -1414,12 +1415,17 @@ async function sendTextMessage() {
 }
 
 // --- AHİZE / HANDSFREE SES YÖNLENDİRME VE KESİNTİSİZ ARAMA ---
+// Android uygulamasında telefonun kendi zil sesi / ses seviyesi / ahize-hoparlör yönlendirmesi kullanılır
+function nativeAudio() {
+  const N = window.AndroidNative;
+  return N && typeof N.setCallAudio === 'function' ? N : null;
+}
 function ensureAudioEngine() {
   if (!callAudioCtx || callAudioCtx.state === 'closed') {
     const Ctx = window.AudioContext || window.webkitAudioContext;
     callAudioCtx = new Ctx();
     speakerGain = callAudioCtx.createGain();
-    speakerGain.gain.value = isHandsfreeOn ? 3.2 : 0.55;
+    speakerGain.gain.value = 1.0; // Ses seviyesini telefonun ses tuşları belirler
     speakerGain.connect(callAudioCtx.destination);
     nextPlayTime = 0;
   }
@@ -1435,17 +1441,23 @@ async function applyAudioRouting() {
     btn.style.color = isHandsfreeOn ? '#0b141a' : '';
   }
 
+  const NA = nativeAudio();
+  if (NA) {
+    // Gerçek ahize / hoparlör yönlendirmesini telefon yapar
+    try { NA.setCallAudio(true, isHandsfreeOn); } catch {}
+  }
+
   const remoteVid = document.getElementById('remoteVideo');
   const remoteAud = document.getElementById('remoteAudio');
-  const targetVol = isHandsfreeOn ? 1.0 : 0.35;
+  const targetVol = 1.0; // Yazılımla kısma/yükseltme yok: telefonun görüşme ses seviyesi kullanılır
   if (remoteVid) remoteVid.volume = targetVol;
   if (remoteAud) remoteAud.volume = targetVol;
 
   if (speakerGain && callAudioCtx) {
-    speakerGain.gain.setValueAtTime(isHandsfreeOn ? 3.2 : 0.55, callAudioCtx.currentTime);
+    speakerGain.gain.setValueAtTime(1.0, callAudioCtx.currentTime);
   }
 
-  if (navigator.mediaDevices && typeof navigator.mediaDevices.enumerateDevices === 'function') {
+  if (!NA && navigator.mediaDevices && typeof navigator.mediaDevices.enumerateDevices === 'function') {
     try {
       const devices = await navigator.mediaDevices.enumerateDevices();
       const outputs = devices.filter((d) => d.kind === 'audiooutput' && d.deviceId);
@@ -1503,6 +1515,7 @@ function startRingCycle(mode = 'outgoing') {
       return;
     }
 
+    if (nativeAudio()) return; // Android: zil sesini telefon çalıyor
     try {
       const ctx = new (window.AudioContext || window.webkitAudioContext)();
       const osc = ctx.createOscillator();
@@ -1517,6 +1530,8 @@ function startRingCycle(mode = 'outgoing') {
     } catch {}
   };
 
+  const NA = nativeAudio();
+  if (NA) { try { NA.startRingtone(mode === 'incoming'); } catch {} }
   doRingOnce();
   ringInterval = setInterval(doRingOnce, 2400);
 }
@@ -1524,6 +1539,8 @@ function startRingCycle(mode = 'outgoing') {
 function stopRingtone() {
   if (ringInterval) clearInterval(ringInterval);
   ringInterval = null;
+  const NA = nativeAudio();
+  if (NA) { try { NA.stopRingtone(); } catch {} }
 }
 
 async function getUserMediaSafe(callType) {
@@ -1868,6 +1885,9 @@ document.getElementById('toggleCamBtn').onclick = () => {
 
 function closeCallScreen() {
   stopRingtone();
+  const NA = nativeAudio();
+  if (NA) { try { NA.setCallAudio(false, false); } catch {} }
+  isHandsfreeOn = false;
   stopWsMediaRelay();
   if (statsInterval) clearInterval(statsInterval);
   if (localStream) localStream.getTracks().forEach((t) => t.stop());
